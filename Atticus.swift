@@ -732,6 +732,43 @@ AudioRecovery.start()
 
 // What read-aloud says: an answer's words without its Markdown marks, its TeX math read loosely ("root 7 over 8").
 // Starts the Kokoro voice service in the background (no-op if it's running or not installed).
+// JARVIS mode: the full-screen face, on the Lenovo when it's connected, else this Mac's own screen. Transparent,
+// click-through, over the menu bar and Dock. It shows no text: everything is spoken.
+final class JarvisFace: NSObject, WKNavigationDelegate {
+    private var panel: NSPanel?, web: WKWebView?, ready = false, queue: [String] = [], hideGen = 0
+    private(set) var shown = false
+    static func screen() -> NSScreen? {
+        let id = { (s: NSScreen) in (s.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0 }
+        return NSScreen.screens.first { s in ["legion", "lenovo"].contains { s.localizedName.lowercased().contains($0) } }
+            ?? NSScreen.screens.first { CGDisplayIsBuiltin(id($0)) != 0 } ?? NSScreen.main
+    }
+    private func make() -> NSPanel {
+        let p = NSPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        p.isReleasedWhenClosed = false; p.isOpaque = false; p.backgroundColor = .clear; p.hasShadow = false; p.ignoresMouseEvents = true
+        p.hidesOnDeactivate = false; p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
+        p.level = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue - 1)
+        applySharing(p)
+        let w = WKWebView(frame: .zero, configuration: WKWebViewConfiguration()); w.setValue(false, forKey: "drawsBackground"); w.navigationDelegate = self
+        loadPage(w, "jarvis.html"); p.contentView = w; web = w; panel = p
+        return p
+    }
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { ready = true; queue.forEach { webView.evaluateJavaScript($0) }; queue = [] }
+    func run(_ js: String) {
+        if ready { web?.evaluateJavaScript(js) } else if !js.hasPrefix("jarvis.level") { queue.append(js) }
+    }
+    func wake() {
+        guard let screen = Self.screen() else { return }
+        let p = panel ?? make(); hideGen += 1; shown = true
+        p.setFrame(screen.frame, display: true); p.orderFrontRegardless(); run("jarvis.wake()")
+    }
+    func sleep() {
+        guard shown else { return }
+        shown = false; run("jarvis.sleep()"); hideGen += 1; let g = hideGen
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) { [weak self] in   // after the sign-off animation
+            guard let self, g == hideGen, !shown else { return }; panel?.orderOut(nil)
+        }
+    }
+}
 func jarvisWarm() {
     guard let me = Bundle.main.executableURL else { return }
     let p = Process(); p.executableURL = me; p.arguments = ["--jarvis-warm"]; try? p.run()
@@ -2343,6 +2380,12 @@ final class App: NSObject, WKScriptMessageHandler {
     }
     func finishOrSignOff() {   // JARVIS mode: a sign-off ends the hands-free chat instead of being sent
         if handsFree, offerText == nil, Prefs.bool("jarvis"), Self.endsJarvisChat(text) { cue("soundStop"); close(clear: false); return }
+        if jarvisApproval, retryOffer, !askFile.isEmpty, let old = offerText {   // the spoken answer to an approval
+            let heard = text; text = old; offerText = nil
+            if let ok = Self.jarvisYesNo(heard) { jarvisApproval = false; retryOffer = false; allow(ok) }
+            else { jarvisSpeakLive("Sorry, yes or no?"); jarvisEndLive(); jarvisCardListen() }
+            return
+        }
         finish()
     }
     func clickMicrophone(quiet: Bool = false) {
@@ -2594,6 +2637,32 @@ final class App: NSObject, WKScriptMessageHandler {
         guard v.isRunning else { return false }; v.terminate(); return true
     }
     // JARVIS mode: the voice starts on the reply's first finished sentence ("♪" lines) and the rest follows as it is written.
+    lazy var face = JarvisFace()
+    var micLevel = 0.0, jarvisVoiceLevel = 0.0, jarvisVoiceAt = Date.distantPast, jarvisActiveAt = Date.distantPast, faceState = "", jarvisApproval = false
+    func jarvisTick() {   // 30 times a second: wake or sleep the face, and give it the state and the voice's loudness
+        let on = Prefs.bool("jarvis")
+        guard on || face.shown else { return }
+        let speaking = voice?.isRunning == true
+        if on && !dictating && (handsFree || busy || engine.isRunning || speaking) {
+            jarvisActiveAt = Date()
+            if !face.shown { face.wake(); faceState = "" }
+        } else if face.shown && Date().timeIntervalSince(jarvisActiveAt) > 1.2 { face.sleep(); return }
+        guard face.shown else { return }
+        let state = speaking ? "speak" : engine.isRunning ? "listen" : busy ? "think" : "idle"
+        if state != faceState { faceState = state; face.run("jarvis.state('\(state)')") }
+        let level = speaking ? (Date().timeIntervalSince(jarvisVoiceAt) < 0.3 ? jarvisVoiceLevel : 0) : engine.isRunning ? micLevel : 0
+        face.run(String(format: "jarvis.level(%.3f)", level))
+    }
+    func jarvisLevels(_ p: Process) {   // the voice helper reports its loudness; the face glows with it
+        var env = ProcessInfo.processInfo.environment; env["ATTICUS_JARVIS_LEVELS"] = "1"; p.environment = env
+        let out = Pipe(); p.standardOutput = out
+        out.fileHandleForReading.readabilityHandler = { [weak self] h in
+            let data = h.availableData
+            if data.isEmpty { h.readabilityHandler = nil; return }
+            guard let line = String(decoding: data, as: UTF8.self).split(separator: "\n").last, line.hasPrefix("L "), let v = Double(line.dropFirst(2)) else { return }
+            DispatchQueue.main.async { self?.jarvisVoiceLevel = v; self?.jarvisVoiceAt = Date() }
+        }
+    }
     var jarvisLive: Process?, jarvisLiveIn: FileHandle?, jarvisVoiced = ""
     func jarvisSpeakLive(_ sentence: String) {
         guard Prefs.bool("jarvis"), Prefs.bool("speak"), let me = Bundle.main.executableURL else { return }
@@ -2604,6 +2673,7 @@ final class App: NSObject, WKScriptMessageHandler {
             p.terminationHandler = { [weak self] _ in DispatchQueue.main.async {
                 guard let self, self.voice === p else { return }; self.voice = nil; self.cueEnds = max(self.cueEnds, Date().addingTimeInterval(0.3)); self.hide(after: 2)
             } }
+            jarvisLevels(p)
             guard (try? p.run()) != nil else { return }
             voice = p; jarvisLive = p; jarvisLiveIn = input.fileHandleForWriting; jarvisVoiced = ""
         }
@@ -2614,16 +2684,32 @@ final class App: NSObject, WKScriptMessageHandler {
         let line = jarvisSpoken(spoken(text)).components(separatedBy: .newlines).joined(separator: " ")
         if !line.trimmingCharacters(in: .whitespaces).isEmpty { try? jarvisLiveIn?.write(contentsOf: Data((line + "\n").utf8)) }
     }
-    // JARVIS hands-free: a choices card is asked aloud and answered by voice, no click needed.
+    // JARVIS mode: a choices card is asked aloud and answered by voice, no click needed.
     func jarvisAskCard(_ question: String) {
-        guard handsFree, Prefs.bool("jarvis") else { return }
+        guard Prefs.bool("jarvis") else { return }
         if Prefs.bool("speak"), !question.isEmpty { jarvisSpeakLive(question); jarvisEndLive() }
         jarvisCardListen()
     }
     func jarvisCardListen() {   // the card's own mic, once JARVIS has finished speaking so he doesn't hear himself
-        guard handsFree, Prefs.bool("jarvis"), picking, !engine.isRunning else { return }
+        guard Prefs.bool("jarvis"), picking || jarvisApproval && retryOffer && !askFile.isEmpty, !engine.isRunning else { return }
         if voice?.isRunning == true || Date() < cueEnds { DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in self?.jarvisCardListen() }; return }
         clickMicrophone()
+    }
+    // JARVIS mode: an approval (send, delete, buy, move) is asked aloud and answered with a spoken yes or no.
+    // It reuses the card-reply path (retryOffer), so the next words answer it instead of starting a new ask.
+    func jarvisAskApproval(_ question: String) {
+        guard Prefs.bool("jarvis"), !retryOffer, !askFile.isEmpty else { return }
+        jarvisApproval = true; retryOffer = true
+        let q = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        if Prefs.bool("speak"), !q.isEmpty { jarvisSpeakLive(q.hasSuffix("?") ? q : q + ". Shall I go ahead?"); jarvisEndLive() }
+        jarvisCardListen()
+    }
+    static func jarvisYesNo(_ text: String) -> Bool? {   // nil: not a clear answer
+        let t = " " + text.lowercased().replacingOccurrences(of: "\u{2019}", with: "'").replacingOccurrences(of: #"[.,!?;:]"#, with: " ", options: .regularExpression)
+            .split(separator: " ").joined(separator: " ") + " "
+        let no = [" no ", " nope ", " don't ", " do not ", " cancel ", " stop ", " wait ", " never mind ", " hold on ", " not now ", " negative ", " abort "].contains { t.contains($0) }
+        let yes = [" yes ", " yeah ", " yep ", " yup ", " sure ", " go ahead ", " do it ", " proceed ", " allow ", " okay ", " ok ", " confirm ", " affirmative ", " go for it ", " absolutely ", " please do ", " fine "].contains { t.contains($0) }
+        return yes == no ? nil : yes
     }
     func jarvisEndLive() { try? jarvisLiveIn?.close(); jarvisLiveIn = nil; jarvisLive = nil; jarvisVoiced = "" }   // the voice finishes what it has, then exits
     func deliver(_ a: String, aloud: Bool = true) {   // Settings: read answers aloud, copy them
@@ -2640,6 +2726,7 @@ final class App: NSObject, WKScriptMessageHandler {
             if Prefs.bool("jarvis"), let words = arguments.popLast() { arguments.append(jarvisSpoken(words)) }   // words are always last, after "--"
             shush(); let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/say"); p.arguments = arguments
             if Prefs.bool("jarvis"), let words = arguments.last, let me = Bundle.main.executableURL { p.executableURL = me; p.arguments = ["--jarvis-say", words] }
+            if Prefs.bool("jarvis") { jarvisLevels(p) }
             p.terminationHandler = { [weak self] _ in DispatchQueue.main.async {
                 guard let self, self.voice === p else { return }; self.voice = nil; self.cueEnds = max(self.cueEnds, Date().addingTimeInterval(0.3)); self.hide(after: 2)
             } }
@@ -3037,6 +3124,10 @@ final class App: NSObject, WKScriptMessageHandler {
     }
     func show() {
         gen += 1; js("visible", true); js("mode", Prefs.bool("safe")); js("models", modelChoices())
+        if Prefs.bool("jarvis") && !dictating {   // JARVIS mode: the full-screen face instead of the box, nothing written; Esc still works
+            if escRef == nil { RegisterEventHotKey(UInt32(kVK_Escape), 0, EventHotKeyID(signature: 0x41545443, id: 2), GetApplicationEventTarget(), 0, &escRef) }
+            return
+        }
         startFollowingPointerScreen()
         if panel.isVisible {   // still up: stay where the user dragged it
             NSAnimationContext.runAnimationGroup { $0.duration = 0.18; panel.animator().alphaValue = 1 }
@@ -3571,7 +3662,7 @@ final class App: NSObject, WKScriptMessageHandler {
             var sum: Float = 0
             for i in 0..<Int(buf.frameLength) { sum += ch[i] * ch[i] }
             let v = Double(min(1, sqrt(sum / Float(buf.frameLength)) * 14))
-            DispatchQueue.main.async { if self?.listenID == listeningID, self?.engine.isRunning == true { if self?.quietFollowUp == false { self?.js("level", v) }; if whisper && v > 0.1 { self?.whisperVoiced() } } }
+            DispatchQueue.main.async { if self?.listenID == listeningID, self?.engine.isRunning == true { self?.micLevel = v; if self?.quietFollowUp == false { self?.js("level", v) }; if whisper && v > 0.1 { self?.whisperVoiced() } } }
         }
         engine.start(device, sampleRate: want.sampleRate, onBuffer) { [weak self] result in
             guard let self, listenID == listeningID else { return }
@@ -4160,6 +4251,7 @@ final class App: NSObject, WKScriptMessageHandler {
                     if line.hasPrefix("? ") {   // safe mode: "? <question>\t<command>\t<answer file>"
                         let p = line.dropFirst(2).components(separatedBy: "\t")
                         guard (3...6).contains(p.count) else { continue }
+                        DispatchQueue.main.async { [weak self] in self?.jarvisAskApproval(p[0]) }   // JARVIS: asked aloud, answered by voice
                         self.retryOffer = p.count >= 5 && p[4] == "retry"
                         self.askNeed = p.count == 6 && !self.retryOffer ? (try? JSONSerialization.jsonObject(with:Data(p[5].utf8))) as? [String:Any] ?? [:] : [:]
                         self.askFile = p[2]; self.show(); self.js("ask", [p[0], p[1], self.retryOffer ? "retry" : "", self.retryOffer && p.count == 6 ? p[5] : ""]); continue
@@ -5329,9 +5421,10 @@ func jarvisKokoroWarm(app: Int32) {
 // Plays voice files one after another through the JARVIS chain (optional pitch, filter, room).
 final class JarvisPlayer {
     let engine = AVAudioEngine(), player = AVAudioPlayerNode(), convert = AVAudioMixerNode()
-    var format: AVAudioFormat?, pending = 0
+    var format: AVAudioFormat?, pending = 0, silent = false   // silent: no working sound output, so nothing is tried again
     let lock = NSLock(), finished = DispatchSemaphore(value: 0)
     func add(_ audio: AVAudioFile, gap: Double) -> Bool {
+        if silent { return false }
         if format == nil {
             // Effects need a standard stream, so a mixer converts the voice's own format (often mono 22-24 kHz) first.
             let effects = jarvisSayChain(effect: Prefs.bool("jarvisEffect"))
@@ -5341,7 +5434,20 @@ final class JarvisPlayer {
             let chain: [AVAudioNode] = [convert] + effects
             for (a, b) in zip(chain, chain.dropFirst()) { engine.connect(a, to: b, format: standard) }
             engine.connect(chain.last!, to: engine.mainMixerNode, format: standard)
+            if ProcessInfo.processInfo.environment["ATTICUS_JARVIS_LEVELS"] == "1" {   // "L 0.42" lines for the JARVIS face
+                engine.mainMixerNode.installTap(onBus: 0, bufferSize: 1024, format: nil) { buffer, _ in
+                    guard let ch = buffer.floatChannelData?[0], buffer.frameLength > 0 else { return }
+                    var sum: Float = 0
+                    for i in 0..<Int(buffer.frameLength) { sum += ch[i] * ch[i] }
+                    FileHandle.standardOutput.write(Data(String(format: "L %.3f\n", min(1, sqrt(sum / Float(buffer.frameLength)) * 5)).utf8))
+                }
+            }
             do { try engine.start() } catch { return false }
+            // play() throws an uncatchable exception if the output never ran (no device, or the Mac asleep with the lid shut): wait for it, else give up quietly
+            let ready = Date().addingTimeInterval(1.5)
+            let ticking = { (self.engine.outputNode.lastRenderTime?.isSampleTimeValid ?? false) && (self.engine.outputNode.lastRenderTime?.sampleTime ?? 0) > 0 }
+            while !ticking() && Date() < ready { usleep(10_000) }
+            guard ticking() else { engine.stop(); silent = true; return false }
             format = audio.processingFormat
             silence(0.35)   // Bluetooth headphones wake on new audio and would otherwise drop the first words
             player.play()
@@ -5398,13 +5504,14 @@ if CommandLine.arguments.count == 2, CommandLine.arguments[1] == "--jarvis-warm"
 if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--jarvis-say" {
     let words = CommandLine.arguments[2], file = NSTemporaryDirectory() + "atticus-jarvis-\(getpid()).aiff"
     let rate = max(120, min(260, Prefs.num("jarvisRate")))
-    signal(SIGTERM, SIG_IGN)
+    signal(SIGTERM, SIG_IGN); signal(SIGPIPE, SIG_IGN)
     let stop = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .global())
     stop.setEventHandler { jarvisRenderer?.terminate(); unlink(file); exit(0) }
     stop.resume()
     let out = JarvisPlayer()
     func speak(_ words: String) -> Bool {
         if jarvisKokoroReady(), jarvisKokoroSpeak(words, rate: rate, into: out) { return true }
+        if out.silent { return false }   // no sound output: Apple's voice would not play either
         // Apple's voice: always installed, works offline
         let voice = Prefs.str("jarvisVoice")
         guard jarvisRender("/usr/bin/say", ((installedSayVoices ?? []).contains(voice) ? ["-v", voice] : []) + ["-r", String(Int(rate)), "-o", file, "--", words], limit: 15),
@@ -6113,6 +6220,7 @@ final class SettingsWindow: NSObject, WKScriptMessageHandler, WKNavigationDelega
         case "jarvisPreview":   // Settings' Test voice: one sample through the same JARVIS voice path
             app.shush(); let p = Process(); p.executableURL = Bundle.main.executableURL
             p.arguments = ["--jarvis-say", "Good evening, sir. All systems are running smoothly, and the kettle, regrettably, is not my department."]
+            if Prefs.bool("jarvis") { app.jarvisLevels(p) }
             try? p.run(); app.voice = p
         case "setup": onboarding.open()
         case "models":   // Bind the response to the saved server that was actually probed.
@@ -8670,6 +8778,7 @@ func checkMic() {
 Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in checkMic() }
 let app = App()
 Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in app.wakeTick() }
+Timer.scheduledTimer(withTimeInterval: 1.0 / 30, repeats: true) { _ in app.jarvisTick() }   // JARVIS mode's face; returns at once when off
 let agentsUI = AgentPanels()
 let routineWake = RoutineWake()
 let onboarding = Onboarding()

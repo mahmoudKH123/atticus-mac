@@ -1,0 +1,439 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>JARVIS</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: transparent; }
+  #dim { position: fixed; inset: 0; opacity: 0; transition: opacity .8s ease;
+      background: radial-gradient(ellipse at center, rgba(2,1,0,.9) 0%, rgba(2,1,0,.76) 42%, rgba(2,1,0,.55) 100%); }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; }
+</style>
+</head>
+<body>
+<div id="dim"></div>
+<canvas id="hudBack"></canvas>
+<canvas id="gl"></canvas>
+<canvas id="hud"></canvas>
+<script>
+'use strict';
+// =====================================================================
+// JARVIS: a globe of amber pixel blocks around a tangled core of light. No text.
+// API for the app: jarvis.wake(), jarvis.sleep(), jarvis.state('idle'|'listen'|'think'|'speak'), jarvis.level(0..1)
+// =====================================================================
+const cv = document.getElementById('gl');
+const gl = cv.getContext('webgl', { alpha: true, premultipliedAlpha: true, antialias: true });
+const hudBack = document.getElementById('hudBack'), hb = hudBack.getContext('2d');
+const hud = document.getElementById('hud'), hx = hud.getContext('2d');
+let W = 0, H = 0, DPR = 1;
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2); W = innerWidth; H = innerHeight;
+  for (const c of [cv, hud, hudBack]) { c.width = Math.round(W * DPR); c.height = Math.round(H * DPR); }
+}
+addEventListener('resize', resize); resize();
+
+// ----------------------------- shaders -----------------------------
+// aPos: a direction on the globe (world layer), a flat position (screen layer), or a final position (live parts).
+// aP: radius, seed (<0: live), size (blocks: -(type*100+size); type 1 = along the ring, 2 = pointing out, 3 = square), brightness.
+const VS = `
+attribute vec3 aPos; attribute vec4 aP;
+uniform float uT, uLevel, uGather, uBurst, uCore, uAspect, uScale, uPx, uFade, uHeat, uIsLine, uView;
+uniform vec2 uOff;
+uniform mat3 uRot, uRotZ;
+varying float vA, vHot, vType, vAng;
+float h(float n) { return fract(sin(n) * 43758.5453); }
+vec3 spinY(vec3 v, float a) { float c = cos(a), s = sin(a); return vec3(v.x * c - v.z * s, v.y, v.x * s + v.z * c); }
+void main() {
+  float s = aP.y, live = step(s, 0.0), R0 = aP.x;
+  float core = step(R0, 0.3) * (1.0 - live);
+  float shell = (1.0 - live) * (1.0 - core);
+  float len = max(length(aPos), 0.0001);
+  vec3 nd = aPos / len;
+  // calm: a slow breath, and a gentle swell with the voice
+  float r = R0 * (1.0 + shell * (uLevel * 0.018 + 0.006 * sin(uT * 0.9)));
+  r *= mix(1.0, uCore, core);
+  vec3 p = aPos * r;
+  // forming: the globe spirals in; the pixel ring assembles around the circle
+  float ang = atan(nd.y, nd.x);
+  float delay = mix(h(s + 5.0) * 0.35 + (0.5 - 0.5 * nd.y) * 0.3, fract(ang / 6.2832 + 0.3) * 0.5 + h(s + 5.0) * 0.12, uView);
+  float g = mix(1.0, clamp(uGather * 1.7 - delay, 0.0, 1.0), shell);
+  float ge = 1.0 - pow(1.0 - g, 3.0);
+  vec3 q = p * (1.0 + (1.0 - ge) * (0.5 + h(s + 4.0) * 0.9) * (1.0 - uIsLine * 0.5));
+  p = mix(spinY(q, (1.0 - ge) * (1.0 - ge) * 2.4), q, uView);
+  p *= 1.0 + uBurst * shell * (0.2 + h(s + 8.0) * 0.8);   // signing off: drift outward and fade
+  p = mix(uRot * p, uRotZ * p, uView);
+  float z = 3.2 - p.z;
+  gl_Position = vec4((p.x * (3.2 / z) * uScale + uOff.x) / uAspect, p.y * (3.2 / z) * uScale + uOff.y, 0.0, 1.0);
+  vec3 rd = uRot * nd;
+  float rim = mix(0.1 + 1.45 * pow(1.0 - abs(rd.z), 2.2), 1.0, clamp(live + core + uView, 0.0, 1.0));   // light gathers at the edge
+  float depth = mix(0.5 + 0.5 * clamp(0.5 + p.z * 0.6, 0.0, 1.0), 1.0, uView);
+  float az = abs(aP.z), type = aP.z < 0.0 ? floor(az / 100.0) : 0.0, size = az - type * 100.0;
+  gl_PointSize = size * uPx * (3.2 / z);
+  vA = 2.1 * aP.w * rim * depth * uFade * (1.0 + uLevel * 0.45) * (1.0 + (1.0 - ge) * shell * 1.2)
+       * pow(1.0 - uBurst * shell, 2.0) * mix(1.0, ge * ge, uIsLine * shell);
+  vHot = clamp(aP.w - 0.55 + uLevel * 0.15 + uHeat, 0.0, 1.0);
+  vType = type;
+  vAng = atan(gl_Position.y, gl_Position.x * uAspect);
+}`;
+const PALETTE = `
+vec3 amber(float hot) {   // deep ember -> orange -> gold -> near white
+  vec3 a = mix(vec3(0.78, 0.24, 0.02), vec3(1.0, 0.52, 0.06), smoothstep(0.0, 0.35, hot));
+  a = mix(a, vec3(1.0, 0.78, 0.3), smoothstep(0.35, 0.75, hot));
+  return mix(a, vec3(1.0, 0.96, 0.82), smoothstep(0.78, 1.0, hot));
+}`;
+const FS_POINT = `precision mediump float;
+varying float vA, vHot, vType, vAng;
+${PALETTE}
+void main() {
+  vec2 c = gl_PointCoord - 0.5; c.y = -c.y;
+  float a;
+  if (vType < 0.5) a = pow(smoothstep(0.5, 0.0, length(c)), 1.4);
+  else {
+    float cs = cos(vAng), sn = sin(vAng);
+    vec2 q = vec2(c.x * cs + c.y * sn, -c.x * sn + c.y * cs);       // x: outward from the centre, y: along the ring
+    vec2 hw = vType < 1.5 ? vec2(0.12, 0.46) : (vType < 2.5 ? vec2(0.46, 0.12) : vec2(0.3, 0.3));
+    vec2 e = smoothstep(hw + 0.035, hw - 0.015, abs(q));
+    a = e.x * e.y;
+  }
+  a *= vA;
+  gl_FragColor = vec4(amber(vHot) * a, a);
+}`;
+const FS_LINE = `precision mediump float;
+varying float vA, vHot, vType, vAng;
+uniform float uLineGain;
+${PALETTE}
+void main() { float a = vA * uLineGain; gl_FragColor = vec4(amber(vHot + 0.05) * a, a); }`;
+const VQ = `attribute vec2 aQ; varying vec2 vUv; void main() { vUv = aQ * 0.5 + 0.5; gl_Position = vec4(aQ, 0.0, 1.0); }`;
+const FS_BLUR = `precision mediump float; varying vec2 vUv; uniform sampler2D uTex; uniform vec2 uDir;
+void main() { vec4 c = texture2D(uTex, vUv) * 0.227027;
+  c += (texture2D(uTex, vUv + uDir * 1.3846) + texture2D(uTex, vUv - uDir * 1.3846)) * 0.316216;
+  c += (texture2D(uTex, vUv + uDir * 3.2308) + texture2D(uTex, vUv - uDir * 3.2308)) * 0.070270;
+  gl_FragColor = c; }`;
+const FS_COMP = `precision mediump float; varying vec2 vUv; uniform sampler2D uTex; uniform float uGain;
+void main() { vec3 c = texture2D(uTex, vUv).rgb * uGain; float a = clamp(max(c.r, max(c.g, c.b)), 0.0, 1.0); gl_FragColor = vec4(min(c, vec3(a)), a); }`;
+function shader(type, src) { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)); return s; }
+function program(vs, fs, names, attrs) {
+  const p = gl.createProgram();
+  gl.attachShader(p, shader(gl.VERTEX_SHADER, vs)); gl.attachShader(p, shader(gl.FRAGMENT_SHADER, fs));
+  attrs.forEach((a, i) => gl.bindAttribLocation(p, i, a));
+  gl.linkProgram(p); if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+  const u = { p }; for (const n of names) u[n] = gl.getUniformLocation(p, n); return u;
+}
+const GEO_U = ['uT', 'uLevel', 'uGather', 'uBurst', 'uCore', 'uAspect', 'uScale', 'uPx', 'uFade', 'uHeat', 'uIsLine', 'uView', 'uOff', 'uRot', 'uRotZ', 'uLineGain'];
+const PTS = program(VS, FS_POINT, GEO_U, ['aPos', 'aP']), LNS = program(VS, FS_LINE, GEO_U, ['aPos', 'aP']);
+const BLUR = program(VQ, FS_BLUR, ['uTex', 'uDir'], ['aQ']), COMP = program(VQ, FS_COMP, ['uTex', 'uGain'], ['aQ']);
+gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE); gl.clearColor(0, 0, 0, 0);
+
+// ----------------------------- geometry -----------------------------
+let seed = 23; const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+const gauss = () => { let u = 0; for (let i = 0; i < 4; i++) u += rnd(); return (u - 2) / 2; };
+function unit() { const z = rnd() * 2 - 1, a = rnd() * Math.PI * 2, r = Math.sqrt(1 - z * z); return [r * Math.cos(a), r * Math.sin(a), z]; }
+const norm = v => { const l = Math.hypot(v[0], v[1], v[2]) || 1; return [v[0] / l, v[1] / l, v[2] / l]; };
+const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const along = (d, t, k) => norm([d[0] + t[0] * k, d[1] + t[1] * k, d[2] + t[2] * k]);
+function rotate(v, axis, ang) {
+  const c = Math.cos(ang), s = Math.sin(ang), d = dot(v, axis), x = cross(axis, v);
+  return [v[0] * c + x[0] * s + axis[0] * d * (1 - c), v[1] * c + x[1] * s + axis[1] * d * (1 - c), v[2] * c + x[2] * s + axis[2] * d * (1 - c)];
+}
+const ih = (x, y, z) => { let h = Math.imul(x, 374761393) ^ Math.imul(y, 668265263) ^ Math.imul(z, 1274126177); h = Math.imul(h ^ (h >>> 13), 1274126177); return ((h ^ (h >>> 16)) >>> 0) / 4294967296; };
+function vnoise(x, y, z) {
+  const xi = Math.floor(x), yi = Math.floor(y), zi = Math.floor(z), xf = x - xi, yf = y - yi, zf = z - zi;
+  const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf), w = zf * zf * (3 - 2 * zf), L = (a, b, t) => a + (b - a) * t;
+  return L(L(L(ih(xi, yi, zi), ih(xi + 1, yi, zi), u), L(ih(xi, yi + 1, zi), ih(xi + 1, yi + 1, zi), u), v),
+           L(L(ih(xi, yi, zi + 1), ih(xi + 1, yi, zi + 1), u), L(ih(xi, yi + 1, zi + 1), ih(xi + 1, yi + 1, zi + 1), u), v), w);
+}
+const fbm3 = d => 0.55 * vnoise(d[0] * 2.3 + 11, d[1] * 2.3 + 3, d[2] * 2.3 + 7) + 0.3 * vnoise(d[0] * 4.6 + 1, d[1] * 4.6, d[2] * 4.6) + 0.15 * vnoise(d[0] * 9.1, d[1] * 9.1 + 2, d[2] * 9.1);
+const clump = d => Math.max(0, Math.min(1, (fbm3(d) - 0.4) / 0.22));
+function clustered() { for (;;) { const d = unit(), c = clump(d); if (rnd() < 0.05 + 0.95 * c) return [d, c]; } }
+const ring1 = a => Math.max(0, Math.min(1, (0.55 * vnoise(Math.cos(a) * 3 + 5, Math.sin(a) * 3 + 9, 1.5) + 0.3 * vnoise(Math.cos(a) * 7, Math.sin(a) * 7, 4.2) + 0.15 * vnoise(Math.cos(a) * 15, Math.sin(a) * 15, 7.7) - 0.36) / 0.26));
+function ringAngle() { for (;;) { const a = rnd() * Math.PI * 2, c = ring1(a); if (rnd() < 0.08 + 0.92 * c) return [a, c]; } }
+
+function mesh() { return { pos: [], par: [] }; }
+const block = (type, size) => -(type * 100 + size);
+const sd = () => rnd() * 1000 + 1;
+function vert(m, p, radius, size, bright, s) { m.pos.push(p[0], p[1], p[2]); m.par.push(radius, s, size, bright); }
+const LW = mesh(), LV = mesh(), PW = mesh(), PV = mesh();   // lines and points; world (turning globe) and screen (flat ring)
+
+// --- the globe: clumps of pixel blocks, like lit city blocks ---
+for (let c = 0; c < 2100; c++) {
+  const [d, k] = clustered(), lat = norm(cross(d, [0, 1, 0])), lon = cross(lat, d), cell = 0.008 + rnd() * 0.006, s = sd();
+  const hot = rnd() < 0.1 ? 1.0 : 0.3 + rnd() * 0.45, nx = 1 + Math.floor(rnd() * 4), ny = 1 + Math.floor(rnd() * 3), radius = 1.0 + gauss() * 0.012;
+  for (let i = 0; i < nx; i++) for (let j = 0; j < ny; j++) {
+    if (rnd() < 0.4) continue;
+    const p = along(along(d, lat, (i - nx / 2) * cell), lon, (j - ny / 2) * cell);
+    const t = rnd(), type = t < 0.45 ? 1 : t < 0.65 ? 2 : 3;
+    vert(PW, p, radius, block(type, 1.6 + rnd() * 2.6), hot * (0.55 + 0.45 * k) * (0.7 + rnd() * 0.3), s);
+  }
+}
+for (let i = 0; i < 2600; i++) { const [d, k] = clustered(), t = rnd(); vert(PW, d, 1.0 + gauss() * 0.015, block(t < 0.5 ? 1 : t < 0.75 ? 2 : 3, 1.3 + rnd() * 2.2), (0.25 + rnd() * 0.5) * (0.5 + 0.5 * k), sd()); }
+for (let i = 0; i < 600; i++) vert(PW, unit(), 0.78 + rnd() * 0.12, block(3, 1.2 + rnd() * 1.4), 0.08 + rnd() * 0.12, sd());   // faint inner layer
+// a few circuit traces on the globe, mostly along the latitude lines
+for (let c = 0; c < 1100; c++) {
+  const [d, k] = clustered(), lat = norm(cross(d, [0, 1, 0])), lon = cross(lat, d), t = rnd() < 0.75 ? lat : lon, len = 0.015 + Math.pow(rnd(), 2) * 0.09, s = sd(), hot = (0.3 + rnd() * 0.4) * (0.5 + 0.5 * k), radius = 1.0 + gauss() * 0.01;
+  vert(LW, d, radius, 0, hot, s); vert(LW, along(d, t, len), radius, 0, hot, s);
+}
+// the core's pixels
+for (let i = 0; i < 700; i++) { const d = unit(), t = rnd(); vert(PW, d, 0.05 + Math.pow(rnd(), 1.5) * 0.24, block(t < 0.4 ? 1 : t < 0.6 ? 2 : 3, 1.2 + rnd() * 2.2), 0.45 + rnd() * 0.5, sd()); }
+for (let i = 0; i < 300; i++) vert(PW, unit(), Math.pow(rnd(), 2) * 0.07, 1.6 + rnd() * 2.4, 0.75 + rnd() * 0.25, sd());
+
+// --- the flat ring: a thick, broken outline of pixel blocks, always facing you ---
+for (let c = 0; c < 1100; c++) {
+  const [a, k] = ringAngle(), roll = rnd();
+  const rc = roll < 0.24 ? 0.66 + rnd() * 0.22 : roll < 0.9 ? 0.89 + rnd() * 0.11 : 1.01 + rnd() * 0.08;   // some clusters reach inward, a few stick out
+  const cell = 0.009 + rnd() * 0.008, nx = 2 + Math.floor(rnd() * 6), ny = 1 + Math.floor(rnd() * (rc < 0.88 ? 2 : 4)), s = sd();
+  const hot = rnd() < 0.13 ? 1.0 : 0.35 + rnd() * 0.45, bright = hot * (0.25 + 0.75 * k) * (rc < 0.88 ? 0.75 : 1);
+  for (let i = 0; i < nx; i++) for (let j = 0; j < ny; j++) {
+    if (rnd() < 0.35) continue;
+    const r = rc + (j - ny / 2) * cell, aa = a + (i - nx / 2) * cell / r, t = rnd();
+    vert(PV, [r * Math.cos(aa), r * Math.sin(aa), 0], 1, block(t < 0.45 ? 3 : t < 0.8 ? 1 : 2, 2.0 + rnd() * 2.6), bright * (0.75 + rnd() * 0.25), s);
+  }
+}
+for (let i = 0; i < 2200; i++) {
+  const [a, k] = ringAngle(), r = 0.92 + gauss() * 0.09, t = rnd();
+  vert(PV, [r * Math.cos(a), r * Math.sin(a), 0], 1, block(t < 0.4 ? 3 : t < 0.75 ? 1 : 2, 1.4 + rnd() * 2.2), (0.2 + rnd() * 0.45) * (0.3 + 0.7 * k), sd());
+}
+for (let i = 0; i < 500; i++) { const a = rnd() * Math.PI * 2, r = 0.3 + Math.pow(rnd(), 0.6) * 0.55; vert(PV, [r * Math.cos(a), r * Math.sin(a), 0], 1, block(2, 1.2 + rnd() * 1.8), 0.1 + rnd() * 0.2, sd()); }
+// a ruler of ticks along the lower-left edge
+for (let i = 0; i < 64; i++) { const a = Math.PI * (1.08 + i / 64 * 0.32), r = 0.955; vert(PV, [r * Math.cos(a), r * Math.sin(a), 0], 1, block(2, i % 4 === 0 ? 7 : 4.5), i % 4 === 0 ? 0.75 : 0.45, sd()); }
+// faint streaks pointing out from the centre across the face, and short arcs along the outline
+for (let i = 0; i < 800; i++) {
+  const [a, k] = ringAngle(), r0 = 0.22 + Math.pow(rnd(), 0.7) * 0.66, l = 0.02 + rnd() * 0.09, s = sd(), b = (0.1 + rnd() * 0.3) * (0.4 + 0.6 * k) * (0.4 + 0.6 * r0);
+  vert(LV, [r0 * Math.cos(a), r0 * Math.sin(a), 0], 1, 0, b * 0.3, s); vert(LV, [(r0 + l) * Math.cos(a), (r0 + l) * Math.sin(a), 0], 1, 0, b, s);
+}
+for (let i = 0; i < 380; i++) {
+  const [a, k] = ringAngle(), r = 0.86 + rnd() * 0.18, span = 0.02 + rnd() * 0.1, s = sd(), b = (0.25 + rnd() * 0.5) * (0.4 + 0.6 * k);
+  for (let j = 0; j < 4; j++) { const a0 = a + span * j / 4, a1 = a + span * (j + 1) / 4; vert(LV, [r * Math.cos(a0), r * Math.sin(a0), 0], 1, 0, b, s); vert(LV, [r * Math.cos(a1), r * Math.sin(a1), 0], 1, 0, b, s); }
+}
+
+// --- live: the tangled core loops and the big crescents, rebuilt every frame ---
+const LOOPS = [[1, 2, 3], [2, 3, 1], [3, 1, 2], [1, 3, 2], [2, 1, 3], [3, 2, 1], [1, 2, 1], [2, 1, 2], [1, 1, 2], [3, 2, 2]].map(f => ({ f, ph: [rnd() * 6.28, rnd() * 6.28, rnd() * 6.28], r: 0.11 + rnd() * 0.08, axis: unit(), speed: (rnd() < 0.5 ? -1 : 1) * (0.3 + rnd() * 0.4), glow: 0.75 + rnd() * 0.45 }));
+// crescents face you (drawn in screen space): the big one sweeps around the left of the core
+const CRESCENTS = [
+  { r: 0.44, th0: 92, span: 178, strands: 18, w: 0.075, b: 1.0, sway: 9, tilt: 0.28, speed: 0 },
+  { r: 0.31, th0: -62, span: 118, strands: 8, w: 0.03, b: 0.85, sway: 14, tilt: -0.35, speed: 0 },
+  { r: 0.24, th0: 20, span: 200, strands: 4, w: 0.012, b: 0.9, sway: 0, tilt: 0.5, speed: 25 },
+];
+const STATIC_LW = LW.pos.length / 3, LIVE_MAX = 9000;
+for (let i = 0; i < LIVE_MAX * 2; i++) vert(LW, [0, 0, 0], 1, 0, 0, -1 - rnd() * 1000);
+function upload(m, usage) {
+  const pos = new Float32Array(m.pos), par = new Float32Array(m.par), bp = gl.createBuffer(), bq = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, bp); gl.bufferData(gl.ARRAY_BUFFER, pos, usage);
+  gl.bindBuffer(gl.ARRAY_BUFFER, bq); gl.bufferData(gl.ARRAY_BUFFER, par, usage);
+  return { pos, par, bp, bq, n: pos.length / 3 };
+}
+const BLW = upload(LW, gl.DYNAMIC_DRAW), BLV = upload(LV, gl.STATIC_DRAW), BPW = upload(PW, gl.STATIC_DRAW), BPV = upload(PV, gl.STATIC_DRAW);
+function bind(b) {
+  gl.bindBuffer(gl.ARRAY_BUFFER, b.bp); gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
+  gl.bindBuffer(gl.ARRAY_BUFFER, b.bq); gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 4, gl.FLOAT, false, 0, 0);
+}
+let liveCount = 0;
+function updateLive(core, level, scale, arcP) {
+  let o = STATIC_LW * 3, q = STATIC_LW * 4, n = 0;
+  const pos = BLW.pos, par = BLW.par;
+  const seg = (a, b, ba, bb) => {
+    if (n >= LIVE_MAX) return; n++;
+    pos[o++] = a[0] * scale; pos[o++] = a[1] * scale; pos[o++] = a[2] * scale; par[q + 3] = ba; q += 4;
+    pos[o++] = b[0] * scale; pos[o++] = b[1] * scale; pos[o++] = b[2] * scale; par[q + 3] = bb; q += 4;
+  };
+  const basis = axis => { const u = norm(cross(axis, Math.abs(axis[1]) < 0.9 ? [0, 1, 0] : [1, 0, 0])); return [u, cross(axis, u)]; };
+  // the tangle: closed looping ribbons of light, each turning on its own axis, with a glint running along it
+  for (const L of LOOPS) {
+    const ang = core * L.speed, sc = L.r * (1 + level * 0.06);
+    const at = (t, k) => rotate([Math.sin(L.f[0] * t + L.ph[0]) * sc * k, Math.sin(L.f[1] * t + L.ph[1]) * sc * k, Math.sin(L.f[2] * t + L.ph[2]) * sc * k], L.axis, ang);
+    for (const [k, g] of [[1, 1], [0.975, 0.45], [1.025, 0.45]]) {
+      let prev = at(0, k);
+      for (let i = 1; i <= 150; i++) {
+        const t = i / 150 * Math.PI * 2, cur = at(t, k), ph = i / 150 - core * 0.12, glint = Math.pow(0.5 + 0.5 * Math.cos((ph - Math.floor(ph)) * Math.PI * 2), 8);
+        const b = g * L.glow * (0.55 + 0.6 * glint) * (1 + level * 0.5); seg(prev, cur, b, b); prev = cur;
+      }
+    }
+  }
+  // the big glowing crescents sweeping around the core
+  const c0 = rotW.slice(0, 3), c1 = rotW.slice(3, 6), c2 = rotW.slice(6, 9), toGlobe = v => [dot(c0, v), dot(c1, v), dot(c2, v)];   // undo the globe's turn
+  for (const C of CRESCENTS) {
+    const deg = Math.PI / 180, start = (C.th0 + C.sway * Math.sin(T * 0.3 + C.r * 10) + core * C.speed) * deg, span = C.span * deg * arcP, ct = Math.cos(C.tilt), st = Math.sin(C.tilt);
+    for (let s = 0; s < C.strands; s++) {
+      const f = s / Math.max(1, C.strands - 1), rr = C.r + f * C.w, prof = Math.pow(1 - f, 1.6) * 0.85 + 0.15;
+      const on = a => { const x = Math.cos(a) * rr, y = Math.sin(a) * rr; return toGlobe([x, y * ct, y * st]); };
+      let prev = on(start), pb = 0;
+      for (let i = 1; i <= 90; i++) {
+        const t = i / 90, cur = on(start + span * t), env = Math.sin(Math.PI * t), b = C.b * prof * env * (0.85 + level * 0.4);
+        seg(prev, cur, pb, b); prev = cur; pb = b;
+      }
+    }
+  }
+  liveCount = n;
+  gl.bindBuffer(gl.ARRAY_BUFFER, BLW.bp); gl.bufferSubData(gl.ARRAY_BUFFER, STATIC_LW * 12, pos.subarray(STATIC_LW * 3, STATIC_LW * 3 + n * 6));
+  gl.bindBuffer(gl.ARRAY_BUFFER, BLW.bq); gl.bufferSubData(gl.ARRAY_BUFFER, STATIC_LW * 16, par.subarray(STATIC_LW * 4, STATIC_LW * 4 + n * 8));
+}
+
+// ----------------------------- glow -----------------------------
+const QUAD = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, QUAD); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+function renderTarget(w, h) {
+  const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+  for (const [k, v] of [[gl.TEXTURE_MIN_FILTER, gl.LINEAR], [gl.TEXTURE_MAG_FILTER, gl.LINEAR], [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]]) gl.texParameteri(gl.TEXTURE_2D, k, v);
+  const f = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, f); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null); return { t, f, w, h };
+}
+let BA = null, BB = null;
+function quad(pr, to, from, setup) {
+  gl.bindFramebuffer(gl.FRAMEBUFFER, to ? to.f : null); gl.viewport(0, 0, to ? to.w : cv.width, to ? to.h : cv.height);
+  gl.useProgram(pr.p); gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, from.t); gl.uniform1i(pr.uTex, 0); setup();
+  gl.disableVertexAttribArray(1); gl.bindBuffer(gl.ARRAY_BUFFER, QUAD); gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+}
+
+// ----------------------------- state -----------------------------
+const STATES = {   // talking only brightens and gently swells; thinking turns things faster
+  idle:   { spin: 0.06, ring: 0.015, core: 0.7, heat: 0.0 },
+  listen: { spin: 0.08, ring: 0.02,  core: 0.9, heat: 0.03 },
+  think:  { spin: 0.3,  ring: 0.09,  core: 3.0, heat: 0.08 },
+  speak:  { spin: 0.09, ring: 0.025, core: 1.2, heat: 0.1 } };
+let state = 'idle', target = 0, level = 0, T = 0, flash = 0;
+let spinAng = 0, ringAng = 0, coreClock = 0, gaugeClock = 0;
+let phase = 'off', phaseAt = 0;
+const cur = { ...STATES.idle };
+const dimEl = document.getElementById('dim');
+window.jarvis = {
+  state(s) { if (STATES[s]) state = s; }, level(v) { target = Math.max(0, Math.min(1, +v || 0)); },
+  wake() { if (phase === 'on' || phase === 'waking') return; phase = 'waking'; phaseAt = T; fired = {}; dimEl.style.opacity = 1; run(); },
+  sleep() { if (phase === 'off' || phase === 'leaving') return; phase = 'leaving'; phaseAt = T; fired = {}; },
+};
+const clamp01 = x => Math.max(0, Math.min(1, x)), ease = x => 1 - Math.pow(1 - clamp01(x), 3);
+const easeIO = x => { x = clamp01(x); return x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2; };
+const backOut = x => { x = clamp01(x); const c = 1.8; return 1 + (c + 1) * Math.pow(x - 1, 3) + c * Math.pow(x - 1, 2); };
+let fired = {};
+const once = (key, cond, fn) => { if (cond && !fired[key]) { fired[key] = 1; fn(); } };
+function timeline() {
+  const e = T - phaseAt;
+  if (phase === 'off') return { core: 0, gather: 0, burst: 0, arcs: 0, hud: 0, shock: -1, fade: 0 };
+  if (phase === 'waking') {   // core lights, a soft shockwave, the globe and ring assemble, the arcs and frame draw in
+    once('ignite', e > 0.05, () => { flash = 0.7; });
+    if (e > 2.4) phase = 'on';
+    return { core: backOut(e / 0.6), gather: clamp01((e - 0.25) / 1.3), burst: 0, arcs: easeIO((e - 0.7) / 1.0), hud: ease((e - 1.1) / 1.0), shock: e < 1.4 ? e / 1.4 : -1, fade: 1 };
+  }
+  if (phase === 'leaving') {   // frame and arcs fold away, the blocks drift out and fade, the core goes out last
+    once('out', e > 0.85, () => { flash = 0.8; dimEl.style.opacity = 0; });
+    if (e > 1.3) { phase = 'off'; return timeline(); }
+    return { core: e < 0.7 ? 1 : 1 - ease((e - 0.7) / 0.5), gather: 1, burst: ease((e - 0.15) / 0.85), arcs: 1 - easeIO(e / 0.55), hud: 1 - ease(e / 0.35), shock: -1, fade: 1 };
+  }
+  return { core: 1, gather: 1, burst: 0, arcs: 1, hud: 1, shock: -1, fade: 1 };
+}
+
+// ----------------------------- frame and background disc (2D, no text) -----------------------------
+function drawBack(R, cx, cy, p) {   // the large faint disc behind the globe
+  hb.setTransform(DPR, 0, 0, DPR, 0, 0); hb.clearRect(0, 0, W, H);
+  if (p <= 0.001) return;
+  const D = R * 1.17, g = hb.createRadialGradient(cx, cy, D * 0.55, cx, cy, D);
+  g.addColorStop(0, 'rgba(90,45,10,0)'); g.addColorStop(0.82, `rgba(110,55,12,${0.06 * p})`); g.addColorStop(1, `rgba(140,70,15,${0.13 * p})`);
+  hb.fillStyle = g; hb.beginPath(); hb.arc(cx, cy, D, 0, Math.PI * 2); hb.fill();
+  hb.strokeStyle = `rgba(200,110,30,${0.28 * p})`; hb.lineWidth = 1.5;
+  hb.beginPath(); hb.arc(cx, cy, D, Math.PI * 0.95, Math.PI * 1.45); hb.stroke();
+  hb.beginPath(); hb.arc(cx, cy, D, Math.PI * 1.9, Math.PI * 2.25); hb.stroke();
+}
+function drawHud(R, cx, cy, tl) {
+  hx.setTransform(DPR, 0, 0, DPR, 0, 0); hx.clearRect(0, 0, W, H);
+  hx.lineCap = 'butt';
+  if (tl.shock >= 0) {
+    const k = ease(tl.shock), r = R * (0.15 + k * 1.6), a = Math.pow(1 - tl.shock, 2) * 0.55;
+    hx.strokeStyle = `rgba(255,190,100,${a})`; hx.lineWidth = 1 + (1 - tl.shock) * 3; hx.beginPath(); hx.arc(cx, cy, r, 0, Math.PI * 2); hx.stroke();
+  }
+  const p = tl.hud;
+  if (p > 0.001) {
+    const c = a => `rgba(255,145,35,${Math.min(1, a)})`, grow = (x0, x1) => x0 + (x1 - x0) * p;
+    // top bar: a dark band, a bright rule, a lit block, and a small end box
+    const ty = cy - R * 1.13, tx0 = cx - R * 1.5, tx1 = cx + R * 0.38;
+    hx.fillStyle = c(0.16 * p); hx.fillRect(tx0, ty - 9, grow(0, tx1 - tx0), 9);
+    hx.fillStyle = c(0.7 * p); hx.fillRect(tx0, ty, grow(0, tx1 - tx0), 2);
+    hx.fillStyle = c(0.45 * p); hx.fillRect(tx0, ty + 3, grow(0, (tx1 - tx0) * 0.24), 3);
+    if (p > 0.6) {
+      const k = (p - 0.6) / 0.4;
+      hx.fillStyle = c(0.8 * k); hx.fillRect(tx1 - R * 0.36, ty - 8, R * 0.1, 7);
+      hx.strokeStyle = c(0.6 * k); hx.lineWidth = 1; hx.strokeRect(tx1 - R * 0.22, ty - 9, R * 0.16, 9);
+      hx.fillStyle = c(0.9 * k); hx.fillRect(tx1 - R * 0.1, ty - 6, 2, 2); hx.fillRect(tx1 - R * 0.1, ty - 3, 2, 2);
+    }
+    // left rails
+    hx.fillStyle = c(0.55 * p); hx.fillRect(cx - R * 1.7, cy - R * 0.58, grow(0, R * 0.75), 2);
+    hx.fillStyle = c(0.22 * p); hx.fillRect(cx - R * 1.7, cy - R * 0.54, grow(0, R * 0.6), 1);
+    hx.fillStyle = c(0.25 * p); hx.fillRect(cx - R * 1.42, cy - R * 0.95, 1, grow(0, R * 2.05));
+    // right bracket and rail
+    hx.strokeStyle = c(0.4 * p); hx.lineWidth = 1.5; hx.beginPath();
+    hx.moveTo(cx + R * 0.98, cy - R * 0.64); hx.lineTo(grow(cx + R * 0.98, cx + R * 1.28), cy - R * 0.64);
+    hx.lineTo(cx + R * 1.28, grow(cy - R * 0.64, cy + R * 1.0)); hx.stroke();
+    hx.fillStyle = c(0.6 * p); hx.fillRect(cx + R * 1.62, cy - R * 1.13, 3, grow(0, R * 0.95));
+    // bottom-right gauge
+    const gx = cx + R * 1.58, gy = cy + R * 1.08, gr = R * 0.11 * p;
+    hx.strokeStyle = c(0.5 * p); hx.lineWidth = 1; hx.beginPath(); hx.arc(gx, gy, gr, 0, Math.PI * 2); hx.stroke();
+    hx.strokeStyle = c(0.8 * p); hx.lineWidth = 2; hx.beginPath(); hx.arc(gx, gy, gr * 0.7, gaugeClock, gaugeClock + Math.PI * (0.6 + level * 0.8)); hx.stroke();
+    for (let i = 0; i < 24; i++) { const a = i / 24 * Math.PI * 2 - gaugeClock * 0.4; hx.strokeStyle = c((i % 6 ? 0.3 : 0.7) * p); hx.beginPath(); hx.moveTo(gx + Math.cos(a) * gr * 1.08, gy + Math.sin(a) * gr * 1.08); hx.lineTo(gx + Math.cos(a) * gr * 1.22, gy + Math.sin(a) * gr * 1.22); hx.stroke(); }
+    hx.fillStyle = c(0.9 * p); hx.beginPath(); hx.arc(gx, gy, 2.5, 0, Math.PI * 2); hx.fill();
+  }
+  if (flash > 0.01) {
+    const gR = R * (0.25 + flash * 0.55), g = hx.createRadialGradient(cx, cy, 0, cx, cy, gR);
+    g.addColorStop(0, `rgba(255,235,190,${flash * 0.7})`); g.addColorStop(0.4, `rgba(255,150,40,${flash * 0.2})`); g.addColorStop(1, 'rgba(255,110,20,0)');
+    hx.fillStyle = g; hx.beginPath(); hx.arc(cx, cy, gR, 0, Math.PI * 2); hx.fill();
+  }
+}
+
+// ----------------------------- render -----------------------------
+const mat = (a, tilt) => { const cy = Math.cos(a), sy = Math.sin(a), cx = Math.cos(tilt), sx = Math.sin(tilt); return [cy, sx * sy, -cx * sy, 0, cx, sx, sy, -sx * cy, cx * cy]; };
+const matZ = a => [Math.cos(a), Math.sin(a), 0, -Math.sin(a), Math.cos(a), 0, 0, 0, 1];
+let rotW = mat(0, 0.3), rotZ = matZ(0);
+function setGeo(pr, tl, lv, px, view) {
+  gl.useProgram(pr.p);
+  gl.uniformMatrix3fv(pr.uRot, false, new Float32Array(rotW)); gl.uniformMatrix3fv(pr.uRotZ, false, new Float32Array(rotZ));
+  gl.uniform1f(pr.uT, T); gl.uniform1f(pr.uLevel, lv); gl.uniform1f(pr.uGather, tl.gather); gl.uniform1f(pr.uBurst, tl.burst); gl.uniform1f(pr.uCore, Math.max(0.0001, tl.core));
+  gl.uniform1f(pr.uHeat, cur.heat); gl.uniform1f(pr.uAspect, W / H); gl.uniform1f(pr.uScale, 0.7); gl.uniform1f(pr.uPx, px); gl.uniform1f(pr.uFade, tl.fade);
+  gl.uniform2f(pr.uOff, 0, 0); gl.uniform1f(pr.uIsLine, pr === LNS ? 1 : 0); gl.uniform1f(pr.uView, view); gl.uniform1f(pr.uLineGain, 1);
+}
+function drawScene(tl, lv, glow) {
+  const px = H * DPR / 760 / (glow ? 4 : 1), off = 2 / (H * DPR);
+  const lines = (buf, view, count) => {
+    setGeo(LNS, tl, lv, px, view); bind(buf);
+    for (const [ox, oy, g] of glow ? [[0, 0, 0.9]] : [[0, 0, 0.9], [off, off * 0.5, 0.35]]) { gl.uniform2f(LNS.uOff, ox, oy); gl.uniform1f(LNS.uLineGain, g); gl.drawArrays(gl.LINES, 0, count); }
+  };
+  lines(BLW, 0, STATIC_LW + liveCount * 2); lines(BLV, 1, BLV.n);
+  setGeo(PTS, tl, lv, px, 0); bind(BPW); gl.drawArrays(gl.POINTS, 0, BPW.n);
+  setGeo(PTS, tl, lv, px, 1); bind(BPV); gl.drawArrays(gl.POINTS, 0, BPV.n);
+}
+let last = performance.now(), running = false;
+function run() { if (running) return; running = true; last = performance.now(); requestAnimationFrame(frame); }
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now; T += dt;
+  const s = STATES[state]; for (const k in cur) cur[k] += (s[k] - cur[k]) * Math.min(1, dt * 2);
+  level += (target - level) * Math.min(1, dt * (target > level ? 8 : 3));   // a soft, even glow with the voice
+  flash *= Math.exp(-dt * 2.6);
+  const tl = timeline(), lv = Math.min(1, (phase === 'on' ? level : 0) + flash * 0.3);
+  spinAng += dt * cur.spin; ringAng += dt * cur.ring; coreClock += dt * cur.core * (1 + lv * 0.6); gaugeClock += dt * (0.4 + cur.spin * 2);
+  rotW = mat(spinAng, 0.3); rotZ = matZ(ringAng);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.viewport(0, 0, cv.width, cv.height); gl.clear(gl.COLOR_BUFFER_BIT);
+  const R = H * 0.35, cx = W / 2, cy = H / 2;
+  drawBack(R, cx, cy, tl.hud);
+  if (phase !== 'off') {
+    updateLive(coreClock, lv, Math.max(0.0001, tl.core), tl.arcs);
+    const bw = Math.max(1, Math.round(cv.width / 4)), bh = Math.max(1, Math.round(cv.height / 4));
+    if (!BA || BA.w !== bw || BA.h !== bh) { BA = renderTarget(bw, bh); BB = renderTarget(bw, bh); }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, BA.f); gl.viewport(0, 0, bw, bh); gl.clear(gl.COLOR_BUFFER_BIT);
+    drawScene(tl, lv, true);
+    gl.disable(gl.BLEND);
+    for (let i = 0; i < 2; i++) {
+      quad(BLUR, BB, BA, () => gl.uniform2f(BLUR.uDir, (1.5 + i) / bw, 0));
+      quad(BLUR, BA, BB, () => gl.uniform2f(BLUR.uDir, 0, (1.5 + i) / bh));
+    }
+    gl.enable(gl.BLEND);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.viewport(0, 0, cv.width, cv.height);
+    drawScene(tl, lv, false);
+    quad(COMP, null, BA, () => gl.uniform1f(COMP.uGain, 0.75 + lv * 0.3));
+  }
+  drawHud(R, cx, cy, tl);
+  if (phase === 'off' && flash < 0.01) { running = false; hx.clearRect(0, 0, W, H); hb.clearRect(0, 0, W, H); return; }   // asleep: stop drawing
+  requestAnimationFrame(frame);
+}
+
+</script>
+</body>
+</html>

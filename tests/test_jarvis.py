@@ -84,7 +84,7 @@ class JarvisTests(unittest.TestCase):
     def test_choices_card_is_asked_aloud_and_answered_by_voice_in_jarvis_hands_free(self):
         app = open(os.path.join(os.path.dirname(__file__), '..', 'Atticus.swift')).read()
         self.assertIn('DispatchQueue.main.async { [weak self] in self?.jarvisAskCard(j["q"] as? String ?? "") }', app)
-        self.assertIn('guard handsFree, Prefs.bool("jarvis"), picking, !engine.isRunning else { return }', app)   # only JARVIS hands-free, only a choices card
+        self.assertIn('guard Prefs.bool("jarvis"), picking || jarvisApproval && retryOffer && !askFile.isEmpty, !engine.isRunning else { return }', app)   # JARVIS mode only: a choices card or a spoken approval
 
 
     def test_ai_sign_off_ends_hands_free_chat_only_in_jarvis_mode(self):
@@ -118,6 +118,39 @@ class JarvisTests(unittest.TestCase):
         self.assertIn('if at < ignoreUntil || claps.count == 2 && at < quietUntil { claps = []; ignoreUntil = at + 1; return }', app)   # applause never wakes
         page = open(os.path.join(os.path.dirname(__file__), '..', 'ui', 'settings.html')).read()
         self.assertIn('data-k="jarvisClap"', page)
+
+
+    def test_face_is_jarvis_only_full_screen_click_through_and_shows_no_text(self):
+        app = open(os.path.join(os.path.dirname(__file__), '..', 'Atticus.swift')).read()
+        face = app[app.index('final class JarvisFace'):app.index('func jarvisWarm()')]
+        self.assertIn('p.ignoresMouseEvents = true', face)                         # clicks pass through
+        self.assertIn('p.setFrame(screen.frame, display: true)', face)             # the whole screen, menu bar and Dock included
+        self.assertIn('["legion", "lenovo"]', face)                                 # the Lenovo when it's connected
+        self.assertIn('CGDisplayIsBuiltin', face)                                   # else this Mac's own screen
+        self.assertIn('applySharing(p)', face)
+        self.assertIn('let on = Prefs.bool("jarvis")', app)
+        self.assertIn('if on && !dictating && (handsFree || busy || engine.isRunning || speaking) {', app)
+        show = app[app.index('    func show() {'):app.index('    func hide(after s: Double) {')]
+        self.assertIn('if Prefs.bool("jarvis") && !dictating {', show)               # no box in JARVIS mode; dictation keeps its pill
+        self.assertIn('Timer.scheduledTimer(withTimeInterval: 1.0 / 30, repeats: true) { _ in app.jarvisTick() }', app)
+        page = open(os.path.join(os.path.dirname(__file__), '..', 'ui', 'jarvis.html')).read()
+        for api in ('wake()', 'sleep()', 'state(s)', 'level(v)'):
+            self.assertIn(api, page)
+        self.assertNotIn('simulate(', page)                                        # the preview's demo loop is not shipped
+        self.assertIn("if (phase === 'off' && flash < 0.01) { running = false;", page)   # draws nothing while asleep
+
+    def test_voice_level_only_when_the_app_asks(self):
+        app = open(os.path.join(os.path.dirname(__file__), '..', 'Atticus.swift')).read()
+        self.assertIn('if ProcessInfo.processInfo.environment["ATTICUS_JARVIS_LEVELS"] == "1" {', app)
+        self.assertIn('env["ATTICUS_JARVIS_LEVELS"] = "1"; p.environment = env', app)
+        self.assertIn('if Prefs.bool("jarvis") { jarvisLevels(p) }', app)
+
+    def test_approvals_are_spoken_and_answered_by_voice_in_jarvis_mode(self):
+        app = open(os.path.join(os.path.dirname(__file__), '..', 'Atticus.swift')).read()
+        self.assertIn('DispatchQueue.main.async { [weak self] in self?.jarvisAskApproval(p[0]) }', app)
+        self.assertIn('guard Prefs.bool("jarvis"), !retryOffer, !askFile.isEmpty else { return }', app)
+        self.assertIn('if let ok = Self.jarvisYesNo(heard) { jarvisApproval = false; retryOffer = false; allow(ok) }', app)
+        self.assertIn('else { jarvisSpeakLive("Sorry, yes or no?"); jarvisEndLive(); jarvisCardListen() }', app)   # unclear: ask again, never guess
 
 
 if __name__ == '__main__':

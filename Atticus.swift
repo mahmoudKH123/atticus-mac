@@ -2431,7 +2431,7 @@ final class App: NSObject, WKScriptMessageHandler {
     }
     func wakeTick() {
         let waits: [(String, Bool)] = [("off", !Prefs.bool("wakeWord") && !clapOn), ("paused", Prefs.bool("paused")), ("asleep", wakeSleeping), ("inactive", wakeInactive),
-            ("meeting", meeting.running), ("busy", busy), ("talking", engine.isRunning), ("dictating", dictating), ("typing", composing),
+            ("meeting", meeting.running), ("busy", busy), ("talking", engine.isRunning), ("dictating", dictating), ("typing", composing && !(Prefs.bool("jarvis") && handsFree && !panel.isVisible)),
             ("shortcut", shortcutDown || dictateShortcutDown), ("box", panel.isVisible && !handsFree),
             ("speaking", voice?.isRunning == true || drawing.voice?.isRunning == true), ("sound", cueSound?.isPlaying == true || Date() < cueEnds),
             ("onboarding", onboarding.win != nil), ("mic permission", AVCaptureDevice.authorizationStatus(for: .audio) != .authorized),
@@ -2679,12 +2679,17 @@ final class App: NSObject, WKScriptMessageHandler {
     }
     func overX(_ p: NSPoint) -> Bool { !pillOn && p.x > panel.frame.width - 42 && p.y > panel.frame.height - 42 }   // the pill has no ✕ corner: its own buttons sit there
     // Words the recognizer should expect: the user's app names plus a few of the user's own (free, on-device).
+    // JARVIS mode: names and tech words Mahmoud says often, so the speech model expects them ("get her desktop" was GitHub Desktop).
+    static let jarvisWords = ["Jarvis", "Mahmoud", "GitHub", "GitHub Desktop", "Azure", "Azure DevOps", "DevOps", "Terraform", "Bicep", "pipeline", "Key Vault",
+                              "Container Apps", "App Service", "Kubernetes", "Docker", "Postgres", "Redis", "Celery", "Django", "Flutter", "Xcode", "Claude", "Spotify",
+                              "Chrome", "Slack", "Teams", "Outlook", "Westcon", "Comstor", "ECS", "New Cairo"]
     var hints: [String] {
         let config = (Prefs.path as NSString).deletingLastPathComponent
         let shortcuts = (try? JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: config + "/skills.json")))) as? [String: Any] ?? [:]
         var seen = Set<String>()
         var all = DictationData.words
         all.append("Atticus")
+        if Prefs.bool("jarvis") { all.append(contentsOf: Self.jarvisWords) }
         all.append(profileName(config + "/me.json"))
         all.append(contentsOf: shortcuts.keys.sorted())
         let appDirs = [NSHomeDirectory() + "/Applications", "/Applications", "/System/Applications", "/System/Applications/Utilities"]
@@ -2721,12 +2726,17 @@ final class App: NSObject, WKScriptMessageHandler {
     }
     // JARVIS mode: the voice starts on the reply's first finished sentence ("♪" lines) and the rest follows as it is written.
     lazy var face = JarvisFace()
-    var micLevel = 0.0, jarvisVoiceLevel = 0.0, jarvisVoiceAt = Date.distantPast, jarvisActiveAt = Date.distantPast, faceState = "", jarvisApproval = false
+    var kokoroCheckedAt = Date(), micLevel = 0.0, jarvisVoiceLevel = 0.0, jarvisVoiceAt = Date.distantPast, jarvisActiveAt = Date.distantPast, faceState = "", jarvisApproval = false
     func jarvisTick() {   // 30 times a second: wake or sleep the face, and give it the state and the voice's loudness
         let on = Prefs.bool("jarvis")
         if on || bargeRequest != nil { bargeTick() }
+        if on || jarvisSpare != nil { jarvisSpareTick() }
+        if on, Date().timeIntervalSince(kokoroCheckedAt) > 20 {   // the voice service gone (an app restart, a crash): start it again before he speaks
+            kokoroCheckedAt = Date()
+            if jarvisKokoroReady(), let fd = jarvisKokoroConnect() { Darwin.close(fd) } else if jarvisKokoroReady() { jarvisWarm() }
+        }
         guard on || face.shown else { return }
-        let speaking = voice?.isRunning == true
+        let speaking = voice?.isRunning == true && (!busy || Date().timeIntervalSince(jarvisVoiceAt) < 0.8)   // the "On it." voice waiting for the reply: thinking
         if on && !dictating && (handsFree || busy || engine.isRunning || speaking) {
             jarvisActiveAt = Date()
             if !face.shown { face.wake(); faceState = "" }
@@ -2744,25 +2754,54 @@ final class App: NSObject, WKScriptMessageHandler {
             let data = h.availableData
             if data.isEmpty { h.readabilityHandler = nil; return }
             guard let line = String(decoding: data, as: UTF8.self).split(separator: "\n").last, line.hasPrefix("L "), let v = Double(line.dropFirst(2)) else { return }
-            DispatchQueue.main.async { self?.jarvisVoiceLevel = v; self?.jarvisVoiceAt = Date() }
+            DispatchQueue.main.async { self?.jarvisVoiceLevel = v; if v > 0.01 { self?.jarvisVoiceAt = Date() } }   // a waiting voice reports silence
         }
     }
     var jarvisLive: Process?, jarvisLiveIn: FileHandle?, jarvisVoiced = ""
-    func jarvisSpeakLive(_ sentence: String) {
+    func jarvisSpeakLive(_ sentence: String, track: Bool = true) {   // track: false for the quick "On it.", which is not part of the reply
         guard Prefs.bool("jarvis"), Prefs.bool("speak"), let me = Bundle.main.executableURL else { return }
         if jarvisLive == nil || voice !== jarvisLive || jarvisLive?.isRunning != true {   // this reply's first sentence
             stopWake(); shush()
-            let p = Process(), input = Pipe(); p.executableURL = me; p.arguments = ["--jarvis-say", "-"]; p.standardInput = input
-            fcntl(input.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
-            p.terminationHandler = { [weak self] _ in DispatchQueue.main.async {
-                guard let self, self.voice === p else { return }; self.voice = nil; self.cueEnds = max(self.cueEnds, Date().addingTimeInterval(0.3)); self.hide(after: 2)
-            } }
-            jarvisLevels(p)
-            guard (try? p.run()) != nil else { return }
-            voice = p; jarvisLive = p; jarvisLiveIn = input.fileHandleForWriting; jarvisVoiced = ""; jarvisSaying = ""
+            let spare = jarvisSpare; jarvisSpare = nil
+            guard let (p, input) = spare?.p.isRunning == true ? spare : jarvisVoiceProcess(me) else { return }
+            voice = p; jarvisLive = p; jarvisLiveIn = input; jarvisVoiced = ""; jarvisSaying = ""
         }
-        jarvisVoiced += " " + sentence
+        if track { jarvisVoiced += " " + sentence }
         jarvisLiveWrite(sentence)
+    }
+    // JARVIS mode: the moment he stops talking, a quick spoken "On it." / "Let me check." fills the gap while the reply is
+    // written; the reply's sentences queue right behind it on the same voice.
+    func jarvisFiller() {
+        let heard = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard Prefs.bool("jarvis"), Prefs.bool("speak"), handsFree, offerText == nil, !heard.isEmpty, !Self.endsJarvisChat(heard) else { return }
+        jarvisSpeakLive(Self.jarvisFillerLine(heard), track: false)
+    }
+    static func jarvisFillerLine(_ text: String, pick: Int = Int.random(in: 0..<1000)) -> String {
+        let skip: Set<String> = ["jarvis", "hey", "okay", "ok", "so", "please", "can", "could", "would", "will", "you", "just", "now", "and", "um", "uh", "right", "alright"]
+        let words = text.lowercased().replacingOccurrences(of: "\u{2019}", with: "'").components(separatedBy: CharacterSet.letters.union(CharacterSet(charactersIn: "'")).inverted).filter { !$0.isEmpty }
+        let first = words.first { !skip.contains($0) } ?? ""
+        let asks: Set<String> = ["what", "what's", "whats", "who", "who's", "where", "where's", "when", "why", "how", "how's", "is", "are", "do", "does", "did", "which", "whose", "tell", "explain", "any", "should", "was", "were", "have", "has"]
+        let does: Set<String> = ["open", "close", "play", "pause", "stop", "move", "put", "send", "download", "find", "search", "show", "turn", "set", "make", "create", "add", "delete", "remove",
+            "start", "run", "go", "take", "check", "read", "write", "reply", "call", "mute", "unmute", "skip", "resume", "launch", "quit", "switch", "book", "schedule", "remind", "save", "copy", "paste", "type", "draft", "get", "bring", "clear", "minimize", "maximize"]
+        let lines = asks.contains(first) || text.hasSuffix("?") ? jarvisFillers[0] : does.contains(first) ? jarvisFillers[1] : jarvisFillers[2]
+        return lines[pick % lines.count]
+    }
+    // A voice started while he talks (its sound output already running), so the first words play the instant he stops.
+    var jarvisSpare: (p: Process, input: FileHandle)?
+    func jarvisVoiceProcess(_ me: URL) -> (p: Process, input: FileHandle)? {
+        let p = Process(), input = Pipe(); p.executableURL = me; p.arguments = ["--jarvis-say", "-"]; p.standardInput = input
+        fcntl(input.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
+        p.terminationHandler = { [weak self] _ in DispatchQueue.main.async {
+            guard let self, self.voice === p else { return }; self.voice = nil; self.cueEnds = max(self.cueEnds, Date().addingTimeInterval(0.3)); self.hide(after: 2)
+        } }
+        jarvisLevels(p)
+        guard (try? p.run()) != nil else { return nil }
+        return (p, input.fileHandleForWriting)
+    }
+    func jarvisSpareTick() {
+        let want = Prefs.bool("jarvis") && Prefs.bool("speak") && handsFree && engine.isRunning && !dictating
+        if want, jarvisSpare?.p.isRunning != true, let me = Bundle.main.executableURL { jarvisSpare = jarvisVoiceProcess(me) }
+        else if !want && !busy, let spare = jarvisSpare { jarvisSpare = nil; try? spare.input.close(); spare.p.terminate() }
     }
     func jarvisLiveWrite(_ text: String) {
         let line = jarvisSpoken(spoken(text)).components(separatedBy: .newlines).joined(separator: " ")
@@ -3526,6 +3565,10 @@ final class App: NSObject, WKScriptMessageHandler {
     }
 
     func review(_ message: String) {
+        if Prefs.bool("jarvis") && handsFree && !dictating {   // JARVIS shows no box to check words in: ask again out loud and listen
+            NSLog("JARVIS: %@ (asked again by voice)", message)
+            hush(); jarvisSpeakLive("Sorry, I lost you there. Say that again?", track: false); jarvisEndLive(); followUp = true; return wakeTick()
+        }
         hush(); js("msg", message)
         pinned = true; panel.makeKey(); panel.makeFirstResponder(web); js("draft", text)
     }
@@ -3803,7 +3846,7 @@ final class App: NSObject, WKScriptMessageHandler {
             var sum: Float = 0
             for i in 0..<Int(buf.frameLength) { sum += ch[i] * ch[i] }
             let v = Double(min(1, sqrt(sum / Float(buf.frameLength)) * 14))
-            DispatchQueue.main.async { if self?.listenID == listeningID, self?.engine.isRunning == true { self?.micLevel = v; if self?.quietFollowUp == false { self?.js("level", v) }; if whisper && v > 0.1 { self?.whisperVoiced() } } }
+            DispatchQueue.main.async { if self?.listenID == listeningID, self?.engine.isRunning == true { self?.micLevel = v; self?.noteVoice(v); if self?.quietFollowUp == false { self?.js("level", v) }; if whisper && v > 0.1 { self?.whisperVoiced() } } }
         }
         if !dictate, let pre = jarvisPreroll, Date().timeIntervalSince(pre.at) < 3 { pre.buffers.forEach(onBuffer) }   // JARVIS talk-over: the words that stopped him begin this ask
         jarvisPreroll = nil
@@ -3815,7 +3858,7 @@ final class App: NSObject, WKScriptMessageHandler {
                 guard let self, listenID == listeningID, engine.isRunning, !whisperReleasing else { return t.invalidate() }
                 let f = (dictating ? dictateHotkey() : hotkey()).flags, held = Date().timeIntervalSince(began)
                 if clickTalk && text.isEmpty && held > ((quietFollowUp || handsFree && picking) && Prefs.bool("jarvis") ? 50 : 8) { t.invalidate(); if quietFollowUp && Prefs.bool("jarvis") { hush(); followUp = true; return wakeTick() }; if quietFollowUp { hush(); fadeIdleHandsFree(); return }; if offerText != nil { stopOfferInput(); jarvisCardListen(); return }; hush(); js("stopped", ""); return hide(after: 3) }   // nothing said: stop the mic quietly
-                if whisper && clickTalk && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && Date().timeIntervalSince(whisperVoice) >= 1.3 { t.invalidate(); return stop() }   // heard() is too late for the 1.3 s pause
+                if whisper && clickTalk && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && Date().timeIntervalSince(whisperVoice) >= endPause() { t.invalidate(); return stop() }   // heard() is too late for the 1.3 s pause
                 if whisper { whisperTick(listeningID) }
                 else if dictating && held >= nextSpeechRollover { nextSpeechRollover += 50; rolloverSpeech(listeningID: listeningID) }
                 if !dictating && held > 60 { t.invalidate(); recordingLimit(); return }
@@ -3824,6 +3867,28 @@ final class App: NSObject, WKScriptMessageHandler {
         }
     }
 
+    // JARVIS mode: the words can lag the voice, so a 1.3 s gap in the words is not the end while the mic still hears him talking.
+    var micFloor = 0.05, voiceHeardAt = Date.distantPast
+    func noteVoice(_ v: Double) {
+        if v > max(0.08, micFloor * 2.5) { voiceHeardAt = Date() } else { micFloor = micFloor * 0.97 + v * 0.03 }   // the room's level, learnt from the quiet
+    }
+    // JARVIS mode: how long a pause ends what he's saying. A sentence that stops on "just", "the", "and", "could you"
+    // is a pause to think, not the end ("Could you please just" was sent on its own): wait 3 s for those, 1.5 s otherwise.
+    func endPause() -> Double { Prefs.bool("jarvis") ? (Self.soundsUnfinished(text) ? 3.0 : 1.5) : 1.3 }
+    static func soundsUnfinished(_ text: String) -> Bool {
+        let words = text.lowercased().replacingOccurrences(of: "\u{2019}", with: "'").components(separatedBy: CharacterSet.letters.union(CharacterSet(charactersIn: "'")).inverted).filter { !$0.isEmpty }
+        guard let last = words.last else { return false }
+        let hanging: Set<String> = ["just", "the", "a", "an", "and", "or", "but", "so", "to", "of", "for", "with", "in", "on", "at", "from", "about", "into", "my", "your",
+            "his", "her", "their", "our", "this", "that", "these", "those", "please", "um", "uh", "erm", "hmm", "like", "then", "because", "if", "when", "while",
+            "could", "can", "would", "will", "should", "i", "i'm", "you", "is", "are", "was", "me", "also", "maybe", "some", "any", "what", "which", "where", "how", "who", "let's", "let"]
+        return hanging.contains(last) || words.count <= 2 && ["could", "can", "would", "will", "please", "hey", "jarvis", "so", "um"].contains(words.first!)
+    }
+    func quietStop() {
+        let quietFor = Date().timeIntervalSince(voiceHeardAt), pause = endPause()
+        guard Prefs.bool("jarvis"), quietFor < pause else { return stop() }
+        let q = DispatchWorkItem { [weak self] in self?.quietStop() }; quiet = q
+        DispatchQueue.main.asyncAfter(deadline: .now() + max(0.1, pause - quietFor), execute: q)
+    }
     func heard(_ now: String) {
         guard engine.isRunning || busy else { return }
         if quietFollowUp {
@@ -3842,14 +3907,15 @@ final class App: NSObject, WKScriptMessageHandler {
         js("words", text)
         let wait = pauseWait()   // nil: Whisper still hears a voice
         if consumed > 0 && transcriptKey(words().prefix(consumed).joined(separator: " ")) != consumedText { liveRevised = true }
-        if Prefs.bool("live") {   // instant commands (open, move, search, play) run mid-sentence; the AI still waits for confirmed words
+        if Prefs.bool("live") && !Prefs.bool("jarvis") {   // instant commands (open, move, search, play) run mid-sentence; the AI still waits for confirmed words
+                                                            // (JARVIS: never mid-sentence; "search for dune 3 trailer find" fired before he finished)
             pause?.cancel()   // only after a pause: "search amazon" mid-word is the start of "search amazon for e-bikes"
             let item = DispatchWorkItem { [weak self] in self?.tryFast() }
             pause = item
             if let wait { DispatchQueue.main.asyncAfter(deadline: .now() + wait, execute: item) }
         }
         if clickTalk && !whisperListen {   // no keys to let go of: a 1.3 s pause ends it (Whisper: the listen timer, on the audio)
-            quiet?.cancel(); let q = DispatchWorkItem { [weak self] in self?.stop() }; quiet = q
+            quiet?.cancel(); let q = DispatchWorkItem { [weak self] in self?.quietStop() }; quiet = q
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.3, execute: q)
         }
         if !ahead.isEmpty && transcriptKey(rest()) != transcriptKey(ahead) { dropAhead() }   // the user kept talking: that start was for half a sentence
@@ -3948,7 +4014,7 @@ final class App: NSObject, WKScriptMessageHandler {
         clickTalk = false; toggleTalk = false; quiet?.cancel()
         busy = true
         if dictating { cue("soundRelease"); js("finishing", dictateCleanup ? "Cleaning up…" : "") }
-        else if offerText == nil { js("think") }   // card replies keep the response clock paused
+        else if offerText == nil { js("think"); jarvisFiller() }   // card replies keep the response clock paused
         let an = analyzer, rd = reading, next = nextAnalyzer
         nextReading?.cancel(); nextFeed = nil; nextAnalyzer = nil; nextReading = nil; nextSpeechInputID = nil; nextSpeechSegment = 0
         Task { await next?.cancelAndFinishNow() }
@@ -3977,9 +4043,16 @@ final class App: NSObject, WKScriptMessageHandler {
             }
             return
         }
-        if Prefs.bool("jarvis") && !dictating && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {   // JARVIS: the words heard are enough;
-            rd?.cancel(); Task { await an?.cancelAndFinishNow() }                                                     // don't wait ~1 s for punctuation
-            return once(true)
+        if Prefs.bool("jarvis") && !dictating && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {   // JARVIS: let the last words land,
+            Task {                                                                                                    // but never wait more than 0.6 s for them
+                try? await an?.finalizeAndFinishThroughEndOfInput(); await rd?.value
+                await MainActor.run { once(true) }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in   // cutting it short dropped "please download GitHub Desktop"
+                guard let self, g == stops else { return }
+                rd?.cancel(); Task { await an?.cancelAndFinishNow() }; once(true)
+            }
+            return
         }
         Task {   // let the model finish the last words, then act
             guard let an else { return await MainActor.run { once(false) } }
@@ -5481,8 +5554,10 @@ let jarvisKokoroServer = """
 import fcntl, json, os, re, socket, sys, threading, time
 home, app = sys.argv[1], int(sys.argv[2])
 lock = open(home + '/tts.lock', 'w')
-try: fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-except OSError: sys.exit(0)
+for _ in range(80):   # an old copy whose app just quit lets go within 15 s: take over then, never run two
+    try: fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB); break
+    except OSError: time.sleep(0.25)
+else: sys.exit(0)
 import soundfile as sf
 from kokoro_onnx import Kokoro
 out = home + '/out'; os.makedirs(out, mode=0o700, exist_ok=True)
@@ -5568,12 +5643,42 @@ final class JarvisPlayer {
     let lock = NSLock(), finished = DispatchSemaphore(value: 0)
     func add(_ audio: AVAudioFile, gap: Double) -> Bool {
         if silent { return false }
-        if format == nil {
+        if format == nil, !prime(audio.processingFormat) { return false }
+        guard audio.processingFormat == format else { return addConverted(audio, gap: gap) }
+        if gap > 0 { silence(gap) }
+        lock.lock(); pending += 1; lock.unlock()
+        player.scheduleFile(audio, at: nil, completionCallbackType: .dataPlayedBack) { [self] _ in
+            lock.lock(); pending -= 1; lock.unlock(); finished.signal()
+        }
+        return true
+    }
+    // Another voice's format (Apple's voice after Kokoro, or a primed player): converted to the running one instead of dropped.
+    func addConverted(_ audio: AVAudioFile, gap: Double) -> Bool {
+        guard let format, let source = AVAudioPCMBuffer(pcmFormat: audio.processingFormat, frameCapacity: AVAudioFrameCount(audio.length)),
+              (try? audio.read(into: source)) != nil, let conv = AVAudioConverter(from: audio.processingFormat, to: format),
+              let out = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(Double(source.frameLength) * format.sampleRate / audio.processingFormat.sampleRate) + 64) else { return false }
+        var given = false
+        conv.convert(to: out, error: nil) { _, status in
+            if given { status.pointee = .endOfStream; return nil }
+            given = true; status.pointee = .haveData; return source
+        }
+        if gap > 0 { silence(gap) }
+        lock.lock(); pending += 1; lock.unlock()
+        player.scheduleBuffer(out, completionCallbackType: .dataPlayedBack) { [self] _ in
+            lock.lock(); pending -= 1; lock.unlock(); finished.signal()
+        }
+        return true
+    }
+    // Starts the sound output for this voice format. Done ahead (a waiting voice) so the first words play at once.
+    func prime(_ voiceFormat: AVAudioFormat) -> Bool {
+        if silent { return false }
+        if format != nil { return true }
+        do {
             // Effects need a standard stream, so a mixer converts the voice's own format (often mono 22-24 kHz) first.
             let effects = jarvisSayChain(effect: Prefs.bool("jarvisEffect"))
             guard let standard = AVAudioFormat(standardFormatWithSampleRate: 44100, channels: 2) else { return false }
             ([player, convert] + effects).forEach { engine.attach($0) }
-            engine.connect(player, to: convert, format: audio.processingFormat)
+            engine.connect(player, to: convert, format: voiceFormat)
             let chain: [AVAudioNode] = [convert] + effects
             for (a, b) in zip(chain, chain.dropFirst()) { engine.connect(a, to: b, format: standard) }
             engine.connect(chain.last!, to: engine.mainMixerNode, format: standard)
@@ -5591,15 +5696,9 @@ final class JarvisPlayer {
             let ticking = { (self.engine.outputNode.lastRenderTime?.isSampleTimeValid ?? false) && (self.engine.outputNode.lastRenderTime?.sampleTime ?? 0) > 0 }
             while !ticking() && Date() < ready { usleep(10_000) }
             guard ticking() else { engine.stop(); silent = true; return false }
-            format = audio.processingFormat
+            format = voiceFormat
             silence(0.35)   // Bluetooth headphones wake on new audio and would otherwise drop the first words
             player.play()
-        }
-        guard audio.processingFormat == format else { return false }
-        if gap > 0 { silence(gap) }
-        lock.lock(); pending += 1; lock.unlock()
-        player.scheduleFile(audio, at: nil, completionCallbackType: .dataPlayedBack) { [self] _ in
-            lock.lock(); pending -= 1; lock.unlock(); finished.signal()
         }
         return true
     }
@@ -5616,8 +5715,46 @@ func jarvisOpen(_ file: String) -> AVAudioFile? {
     defer { try? FileManager.default.removeItem(atPath: file) }   // the open file stays readable; nothing is left behind
     return try? AVAudioFile(forReading: URL(fileURLWithPath: file))
 }
+// JARVIS mode's quick replies the moment Mahmoud stops talking: for a question, a task, anything else.
+let jarvisFillers = [["Let me check.", "Hmm, let me see.", "One sec.", "Let me think.", "Good question, one sec."],
+                     ["On it.", "Sure.", "Right away.", "Okay, on it.", "Sure thing."],
+                     ["Mm-hm.", "Right.", "Okay.", "Got it.", "Hmm."]]
+// Short lines are kept as rendered audio (per voice and speed), so "On it." plays at once instead of waiting on the model.
+func jarvisKokoroCachePath(_ words: String, rate: Double) -> String? {
+    let key = words.lowercased().unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) }.map(String.init).joined()
+    guard words.count <= 30, !key.isEmpty else { return nil }
+    return jarvisKokoroHome + "/cache/\(Prefs.str("jarvisKokoroVoice"))-\(Int(rate))-\(key).wav"
+}
+func jarvisKokoroKeep(_ file: String, as cache: String?) {
+    guard let cache else { return }
+    try? FileManager.default.createDirectory(atPath: (cache as NSString).deletingLastPathComponent, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+    try? FileManager.default.copyItem(atPath: file, toPath: cache)
+}
+func jarvisKokoroPrerender(rate: Double) {   // --jarvis-warm: render the quick replies once the service is up
+    for words in jarvisFillers.joined() {
+        guard let cache = jarvisKokoroCachePath(words, rate: rate), !FileManager.default.fileExists(atPath: cache) else { continue }
+        var fd = jarvisKokoroConnect(); let deadline = Date().addingTimeInterval(40)
+        while fd == nil && Date() < deadline { usleep(250_000); fd = jarvisKokoroConnect() }
+        guard let fd, let request = try? JSONSerialization.data(withJSONObject: ["text": words, "voice": Prefs.str("jarvisKokoroVoice"), "speed": rate / 180]) else { return }
+        _ = (request + Data("\n".utf8)).withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
+        var buffer = Data(), chunk = [UInt8](repeating: 0, count: 4096)
+        while true {
+            let n = read(fd, &chunk, chunk.count); if n <= 0 { break }
+            buffer.append(contentsOf: chunk[0..<n]); if buffer.contains(Data("done\n".utf8)) { break }
+        }
+        close(fd)
+        let files = String(decoding: buffer, as: UTF8.self).split(separator: "\n").map(String.init).filter { $0.hasPrefix(jarvisKokoroHome + "/out/") }
+        if files.count == 1 { jarvisKokoroKeep(files[0], as: cache) }
+        files.forEach { unlink($0) }
+    }
+}
 // Streams sentences from the Kokoro service into the player. False only if nothing was played, so Apple's voice can take over.
 func jarvisKokoroSpeak(_ words: String, rate: Double, into out: JarvisPlayer) -> Bool {
+    let cache = jarvisKokoroCachePath(words, rate: rate)
+    if let cache, FileManager.default.fileExists(atPath: cache) {
+        let copy = NSTemporaryDirectory() + "atticus-jarvis-\(getpid())-\(UUID().uuidString).wav"
+        if (try? FileManager.default.copyItem(atPath: cache, toPath: copy)) != nil, let audio = jarvisOpen(copy), out.add(audio, gap: out.format != nil ? 0.12 : 0) { return true }
+    }
     var fd = jarvisKokoroConnect()
     if fd == nil {   // not running yet: start it and wait for the model to load
         jarvisKokoroWarm(app: getppid())
@@ -5637,13 +5774,19 @@ func jarvisKokoroSpeak(_ words: String, rate: Double, into out: JarvisPlayer) ->
         while let newline = buffer.firstIndex(of: 10) {
             let line = String(decoding: buffer[buffer.startIndex..<newline], as: UTF8.self); buffer.removeSubrange(buffer.startIndex...newline)
             if line == "done" { return played > 0 }
-            guard line.hasPrefix(jarvisKokoroHome + "/out/"), let audio = jarvisOpen(line), out.add(audio, gap: played > 0 || out.format != nil ? 0.12 : 0) else { continue }
+            guard line.hasPrefix(jarvisKokoroHome + "/out/") else { continue }
+            if played == 0 && words.range(of: #"[.!?;:]\s+\S"#, options: .regularExpression) == nil { jarvisKokoroKeep(line, as: cache) }   // one part: safe to keep
+            guard let audio = jarvisOpen(line), out.add(audio, gap: played > 0 || out.format != nil ? 0.12 : 0) else { continue }
             played += 1
         }
     }
     return played > 0
 }
-if CommandLine.arguments.count == 2, CommandLine.arguments[1] == "--jarvis-warm" { jarvisKokoroWarm(app: getppid()); exit(0) }
+if CommandLine.arguments.count == 2, CommandLine.arguments[1] == "--jarvis-warm" {
+    jarvisKokoroWarm(app: getppid())
+    if jarvisKokoroReady() { jarvisKokoroPrerender(rate: max(120, min(260, Prefs.num("jarvisRate")))) }
+    exit(0)
+}
 if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--jarvis-say" {
     let words = CommandLine.arguments[2], file = NSTemporaryDirectory() + "atticus-jarvis-\(getpid()).aiff"
     let rate = max(120, min(260, Prefs.num("jarvisRate")))
@@ -5662,6 +5805,9 @@ if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--jarvis-say" 
         return out.add(audio, gap: out.format != nil ? 0.12 : 0)
     }
     if words == "-" {   // a reply still being written: one sentence per line on stdin, spoken as each arrives
+        // Started ahead while Mahmoud talks: get the sound output running in Kokoro's format now, so the first line plays at once
+        if jarvisKokoroReady(), let name = (try? FileManager.default.contentsOfDirectory(atPath: jarvisKokoroHome + "/cache"))?.first(where: { $0.hasSuffix(".wav") }),
+           let sample = try? AVAudioFile(forReading: URL(fileURLWithPath: jarvisKokoroHome + "/cache/" + name)) { _ = out.prime(sample.processingFormat) }
         while let line = readLine() { if !line.trimmingCharacters(in: .whitespaces).isEmpty { _ = speak(line) } }
     } else if !speak(words) { exit(1) }
     out.finish()

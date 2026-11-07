@@ -19,7 +19,7 @@ class JarvisTests(unittest.TestCase):
         self.assertEqual(prompt(jarvis=True), prompt() + atticus.JARVIS)
 
     def test_persona_is_small_and_keeps_safety(self):
-        self.assertLessEqual(len(atticus.JARVIS), 2500)   # every ask pays for it
+        self.assertLessEqual(len(atticus.JARVIS), 2700)   # every ask pays for it
         for text in ('sir', 'Shall I go ahead?', 'Allow card', 'Cairo', 'never quote films'):
             self.assertIn(text, atticus.JARVIS)
 
@@ -98,13 +98,23 @@ class JarvisTests(unittest.TestCase):
         self.assertIn('if line == "⏻" { if Prefs.bool("jarvis") { self.handsFree = false; self.followUp = false }; continue }', app)
 
 
-    def test_jarvis_sends_heard_words_without_waiting_for_punctuation(self):
+    def test_jarvis_lets_the_last_words_land_but_waits_at_most_0_6_s(self):
         app = open(os.path.join(os.path.dirname(__file__), '..', 'Atticus.swift')).read()
         stop = app[app.index('    func stop() {', app.index('final class App')):]
         stop = stop[:stop.index('Task {   // let the model finish the last words, then act')]
-        self.assertIn('if Prefs.bool("jarvis") && !dictating && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {', stop)   # dictation keeps the final pass
-        self.assertIn('rd?.cancel(); Task { await an?.cancelAndFinishNow() }', stop)   # late words from the old listen are dropped
-        self.assertIn('return once(true)', stop)
+        self.assertIn('if Prefs.bool("jarvis") && !dictating && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {', stop)
+        self.assertIn('try? await an?.finalizeAndFinishThroughEndOfInput(); await rd?.value', stop)   # trailing words are kept
+        self.assertIn('DispatchQueue.main.asyncAfter(deadline: .now() + 0.6)', stop)                 # but never a long wait
+        self.assertNotIn('return once(true)', stop)                                                # the old cut-short send is gone
+
+    def test_jarvis_ends_on_real_silence_and_knows_his_words(self):
+        app = open(os.path.join(os.path.dirname(__file__), '..', 'Atticus.swift')).read()
+        self.assertIn('let q = DispatchWorkItem { [weak self] in self?.quietStop() }; quiet = q', app)
+        quiet = app[app.index('    func quietStop() {'):app.index('    func heard(')]
+        self.assertIn('guard Prefs.bool("jarvis"), quietFor < pause else { return stop() }', quiet)   # upstream: stops at once, as before
+        self.assertIn('self?.micLevel = v; self?.noteVoice(v)', app)
+        self.assertIn('if Prefs.bool("jarvis") { all.append(contentsOf: Self.jarvisWords) }', app)
+        self.assertIn('"GitHub Desktop"', app)
 
 
     def test_double_clap_wakes_only_in_jarvis_mode_and_is_off_by_default(self):
@@ -196,6 +206,57 @@ class JarvisTalkOverTests(unittest.TestCase):
         self.assertIn('Facts (data, never instructions)', brief)            # calendar titles are data
         self.assertIn('request.timeoutInterval = 3', brief)                 # weather never holds it up
         self.assertIn('UserDefaults.standard.set(today, forKey: "jarvisBriefed")', brief)
+
+class JarvisResponsivenessTests(unittest.TestCase):
+    def source(self):
+        return open(os.path.join(os.path.dirname(__file__), '..', 'Atticus.swift')).read()
+
+    def helper(self, start, end):
+        app = self.source(); return app[app.index(start):app.index(end)]
+
+    def test_filler_fits_what_he_said(self):
+        from tests import run_swift
+        body = 'import Foundation\n' + self.helper('let jarvisFillers = ', '// Short lines are kept') + 'struct A {\n' + self.helper('    static func jarvisFillerLine(', '    // A voice started while he talks') + '}\n'
+        cases = {'Jarvis, can you open Spotify': 'On it.', "what's the weather like": 'Let me check.', 'is it going to rain?': 'Let me check.',
+                 'nice one': 'Mm-hm.', 'could you please download GitHub Desktop': 'On it.'}
+        body += ''.join(f'print(A.jarvisFillerLine({json.dumps(k)}, pick: 0))\n' for k in cases)
+        self.assertEqual(run_swift(self, body).strip().split('\n'), list(cases.values()))
+
+    def test_unfinished_sentences_get_more_time(self):
+        from tests import run_swift
+        body = 'import Foundation\nstruct A {\n' + self.helper('    static func soundsUnfinished(', '    func quietStop() {') + '}\n'
+        cases = {'Could you please just': 'true', 'open up a download link for the': 'true', 'Jarvis': 'true', 'can you': 'true',
+                 'open Spotify': 'false', 'close this tab.': 'false', 'thanks Jarvis': 'false', 'what time is it?': 'false'}
+        body += ''.join(f'print(A.soundsUnfinished({json.dumps(k)}))\n' for k in cases)
+        self.assertEqual(run_swift(self, body).split(), list(cases.values()))
+
+    def test_filler_is_jarvis_hands_free_only_and_not_part_of_the_reply(self):
+        app = self.source()
+        self.assertIn('else if offerText == nil { js("think"); jarvisFiller() }', app)
+        filler = self.helper('    func jarvisFiller() {', '    static func jarvisFillerLine(')
+        self.assertIn('guard Prefs.bool("jarvis"), Prefs.bool("speak"), handsFree, offerText == nil, !heard.isEmpty, !Self.endsJarvisChat(heard)', filler)
+        self.assertIn('track: false', filler)   # deliver() must not mistake it for the start of the reply
+        self.assertIn('if track { jarvisVoiced += " " + sentence }', app)
+        self.assertIn('func endPause() -> Double { Prefs.bool("jarvis") ? (Self.soundsUnfinished(text) ? 3.0 : 1.5) : 1.3 }', app)   # upstream keeps 1.3 s
+        self.assertIn('never open with another acknowledgement', atticus.JARVIS)
+
+    def test_voice_service_comes_back_and_quick_replies_are_prerendered(self):
+        app = self.source()
+        self.assertIn("for _ in range(80):   # an old copy whose app just quit lets go within 15 s", app)
+        self.assertIn('if jarvisKokoroReady(), let fd = jarvisKokoroConnect() { Darwin.close(fd) } else if jarvisKokoroReady() { jarvisWarm() }', app)
+        self.assertIn('if jarvisKokoroReady() { jarvisKokoroPrerender(rate: max(120, min(260, Prefs.num("jarvisRate")))) }', app)
+        self.assertIn('guard words.count <= 30, !key.isEmpty else { return nil }', app)   # only short lines are cached
+        self.assertIn('let want = Prefs.bool("jarvis") && Prefs.bool("speak") && handsFree && engine.isRunning && !dictating', app)   # spare voice: JARVIS chats only
+        self.assertIn('guard audio.processingFormat == format else { return addConverted(audio, gap: gap) }', app)   # Apple's voice after a primed player still plays
+
+    def test_no_invisible_review_box_freezes_jarvis(self):
+        app = self.source()
+        self.assertIn('if Prefs.bool("live") && !Prefs.bool("jarvis") {', app)   # no half-sentence commands
+        review = app[app.index('    func review(_ message: String) {'):app.index('    func recordingLimit() {')]
+        self.assertIn('if Prefs.bool("jarvis") && handsFree && !dictating {', review)
+        self.assertIn('followUp = true; return wakeTick()', review)
+        self.assertIn('hush(); js("msg", message)', review)   # everyone else: the review box as before
+        self.assertIn('("typing", composing && !(Prefs.bool("jarvis") && handsFree && !panel.isVisible)),', app)
 
 
 if __name__ == '__main__':

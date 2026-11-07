@@ -39,6 +39,7 @@ addEventListener('resize', resize); resize();
 const VS = `
 attribute vec3 aPos; attribute vec4 aP;
 uniform float uT, uLevel, uGather, uBurst, uCore, uAspect, uScale, uPx, uFade, uHeat, uIsLine, uView;
+uniform float uListen, uOrbitW, uOrbit, uPulseR, uPulseA;   // alive: ripples with his voice, an orbiting glint, a pulse through the rings
 uniform vec2 uOff;
 uniform mat3 uRot, uRotZ;
 varying float vA, vHot, vType, vAng;
@@ -63,6 +64,13 @@ void main() {
   p = mix(spinY(q, (1.0 - ge) * (1.0 - ge) * 2.4), q, uView);
   p *= 1.0 + uBurst * shell * (0.2 + h(s + 8.0) * 0.8);   // signing off: drift outward and fade
   p = mix(uRot * p, uRotZ * p, uView);
+  // alive: while he talks the ring ripples with his voice; thinking sends glints round it; a pulse rolls through on "got it" and on each task step
+  float sa = atan(p.y, p.x), wave = 0.5 + 0.5 * sin(sa * 7.0 - uT * 5.0 + h(s + 2.0) * 0.8);
+  p *= 1.0 + uView * uListen * uLevel * 0.03 * wave;
+  float da = mod(sa - uOrbit + 3.14159, 6.28318) - 3.14159, db = mod(sa - uOrbit, 6.28318) - 3.14159;
+  float glint = exp(-da * da * 30.0) + (da < 0.0 ? exp(da * 3.5) * 0.35 : 0.0) + exp(-db * db * 30.0) * 0.6 + (db < 0.0 ? exp(db * 3.5) * 0.2 : 0.0);
+  float pr = length(p.xy) - uPulseR, pulse = uPulseA * exp(-pr * pr * 160.0);
+  float alive = 1.0 + uListen * uLevel * 1.2 * wave * (0.4 + 0.6 * uView) + uOrbitW * glint * (0.6 + 1.6 * uView) + pulse * 2.2;
   float z = 3.2 - p.z;
   gl_Position = vec4((p.x * (3.2 / z) * uScale + uOff.x) / uAspect, p.y * (3.2 / z) * uScale + uOff.y, 0.0, 1.0);
   vec3 rd = uRot * nd;
@@ -71,8 +79,8 @@ void main() {
   float az = abs(aP.z), type = aP.z < 0.0 ? floor(az / 100.0) : 0.0, size = az - type * 100.0;
   gl_PointSize = size * uPx * (3.2 / z);
   vA = 2.1 * aP.w * rim * depth * uFade * (1.0 + uLevel * 0.45) * (1.0 + (1.0 - ge) * shell * 1.2)
-       * pow(1.0 - uBurst * shell, 2.0) * mix(1.0, ge * ge, uIsLine * shell);
-  vHot = clamp(aP.w - 0.55 + uLevel * 0.15 + uHeat, 0.0, 1.0);
+       * pow(1.0 - uBurst * shell, 2.0) * mix(1.0, ge * ge, uIsLine * shell) * alive;
+  vHot = clamp(aP.w - 0.55 + uLevel * 0.15 + uHeat + (alive - 1.0) * 0.12, 0.0, 1.0);
   vType = type;
   vAng = atan(gl_Position.y, gl_Position.x * uAspect);
 }`;
@@ -121,7 +129,8 @@ function program(vs, fs, names, attrs) {
   gl.linkProgram(p); if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
   const u = { p }; for (const n of names) u[n] = gl.getUniformLocation(p, n); return u;
 }
-const GEO_U = ['uT', 'uLevel', 'uGather', 'uBurst', 'uCore', 'uAspect', 'uScale', 'uPx', 'uFade', 'uHeat', 'uIsLine', 'uView', 'uOff', 'uRot', 'uRotZ', 'uLineGain'];
+const GEO_U = ['uT', 'uLevel', 'uGather', 'uBurst', 'uCore', 'uAspect', 'uScale', 'uPx', 'uFade', 'uHeat', 'uIsLine', 'uView', 'uOff', 'uRot', 'uRotZ', 'uLineGain',
+               'uListen', 'uOrbitW', 'uOrbit', 'uPulseR', 'uPulseA'];
 const PTS = program(VS, FS_POINT, GEO_U, ['aPos', 'aP']), LNS = program(VS, FS_LINE, GEO_U, ['aPos', 'aP']);
 const BLUR = program(VQ, FS_BLUR, ['uTex', 'uDir'], ['aQ']), COMP = program(VQ, FS_COMP, ['uTex', 'uGain'], ['aQ']);
 gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE); gl.clearColor(0, 0, 0, 0);
@@ -288,20 +297,25 @@ function quad(pr, to, from, setup) {
 }
 
 // ----------------------------- state -----------------------------
-const STATES = {   // talking only brightens and gently swells; thinking turns things faster
-  idle:   { spin: 0.06, ring: 0.015, core: 0.7, heat: 0.0 },
-  listen: { spin: 0.08, ring: 0.02,  core: 0.9, heat: 0.03 },
-  think:  { spin: 0.3,  ring: 0.09,  core: 3.0, heat: 0.08 },
-  speak:  { spin: 0.09, ring: 0.025, core: 1.2, heat: 0.1 } };
+const STATES = {   // listen: the ring ripples with his voice; think: glints orbit; work (a task step): faster glints, a pulse per step; speak: the core beats with the words
+  idle:   { spin: 0.06, ring: 0.015, core: 0.7, heat: 0.0,  listen: 0, orbit: 0,   orbitSpeed: 0,   beat: 0 },
+  listen: { spin: 0.08, ring: 0.02,  core: 0.9, heat: 0.03, listen: 1, orbit: 0,   orbitSpeed: 0,   beat: 0 },
+  think:  { spin: 0.3,  ring: 0.09,  core: 3.0, heat: 0.08, listen: 0, orbit: 0.8, orbitSpeed: 1.8, beat: 0 },
+  work:   { spin: 0.36, ring: 0.14,  core: 3.6, heat: 0.12, listen: 0, orbit: 1.0, orbitSpeed: 3.4, beat: 0 },
+  speak:  { spin: 0.09, ring: 0.025, core: 1.2, heat: 0.1,  listen: 0.5, orbit: 0, orbitSpeed: 0,   beat: 1 } };
 let state = 'idle', target = 0, level = 0, T = 0, flash = 0;
 let spinAng = 0, ringAng = 0, coreClock = 0, gaugeClock = 0;
+let orbitAng = 0, sweepW = 0, pulseR = 0, pulseA = 0, pulse = null, sweepAt = -9;   // alive: glints, the wake-up sweep, the ring pulse
+const startPulse = (from, to, secs, strength) => { pulse = { from, to, secs, strength, at: T }; };
 let phase = 'off', phaseAt = 0;
 const cur = { ...STATES.idle };
 const dimEl = document.getElementById('dim');
 window.jarvis = {
   state(s) { if (STATES[s]) state = s; }, level(v) { target = Math.max(0, Math.min(1, +v || 0)); },
-  wake() { if (phase === 'on' || phase === 'waking') return; phase = 'waking'; phaseAt = T; fired = {}; dimEl.style.opacity = 1; run(); },
-  sleep() { if (phase === 'off' || phase === 'leaving') return; phase = 'leaving'; phaseAt = T; fired = {}; },
+  wake() { if (phase === 'on' || phase === 'waking') return; phase = 'waking'; phaseAt = T; fired = {}; dimEl.style.opacity = 1; sweepAt = T + 1.2; run(); },
+  sleep() { if (phase === 'off' || phase === 'leaving') return; phase = 'leaving'; phaseAt = T; fired = {}; startPulse(1.1, 0, 0.5, 0.8); },
+  heard() { if (phase === 'on') { startPulse(1.15, 0, 0.6, 1); flash = Math.max(flash, 0.3); } },   // "got it": a pulse rolls in to the core
+  step() { if (phase === 'on') { startPulse(0.1, 1.2, 0.75, 0.9); gaugeClock += 0.9; } },          // each task step: a pulse rolls out
 };
 const clamp01 = x => Math.max(0, Math.min(1, x)), ease = x => 1 - Math.pow(1 - clamp01(x), 3);
 const easeIO = x => { x = clamp01(x); return x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2; };
@@ -325,15 +339,8 @@ function timeline() {
 }
 
 // ----------------------------- frame and background disc (2D, no text) -----------------------------
-function drawBack(R, cx, cy, p) {   // the large faint disc behind the globe
+function drawBack() {   // the big faint disc behind the globe was removed (Mahmoud, 07/11); this layer stays empty
   hb.setTransform(DPR, 0, 0, DPR, 0, 0); hb.clearRect(0, 0, W, H);
-  if (p <= 0.001) return;
-  const D = R * 1.17, g = hb.createRadialGradient(cx, cy, D * 0.55, cx, cy, D);
-  g.addColorStop(0, 'rgba(90,45,10,0)'); g.addColorStop(0.82, `rgba(110,55,12,${0.06 * p})`); g.addColorStop(1, `rgba(140,70,15,${0.13 * p})`);
-  hb.fillStyle = g; hb.beginPath(); hb.arc(cx, cy, D, 0, Math.PI * 2); hb.fill();
-  hb.strokeStyle = `rgba(200,110,30,${0.28 * p})`; hb.lineWidth = 1.5;
-  hb.beginPath(); hb.arc(cx, cy, D, Math.PI * 0.95, Math.PI * 1.45); hb.stroke();
-  hb.beginPath(); hb.arc(cx, cy, D, Math.PI * 1.9, Math.PI * 2.25); hb.stroke();
 }
 function drawHud(R, cx, cy, tl) {
   hx.setTransform(DPR, 0, 0, DPR, 0, 0); hx.clearRect(0, 0, W, H);
@@ -386,9 +393,11 @@ let rotW = mat(0, 0.3), rotZ = matZ(0);
 function setGeo(pr, tl, lv, px, view) {
   gl.useProgram(pr.p);
   gl.uniformMatrix3fv(pr.uRot, false, new Float32Array(rotW)); gl.uniformMatrix3fv(pr.uRotZ, false, new Float32Array(rotZ));
-  gl.uniform1f(pr.uT, T); gl.uniform1f(pr.uLevel, lv); gl.uniform1f(pr.uGather, tl.gather); gl.uniform1f(pr.uBurst, tl.burst); gl.uniform1f(pr.uCore, Math.max(0.0001, tl.core));
+  gl.uniform1f(pr.uT, T); gl.uniform1f(pr.uLevel, lv); gl.uniform1f(pr.uGather, tl.gather); gl.uniform1f(pr.uBurst, tl.burst); gl.uniform1f(pr.uCore, Math.max(0.0001, tl.core * (1 + cur.beat * lv * 0.16)));
   gl.uniform1f(pr.uHeat, cur.heat); gl.uniform1f(pr.uAspect, W / H); gl.uniform1f(pr.uScale, 0.7); gl.uniform1f(pr.uPx, px); gl.uniform1f(pr.uFade, tl.fade);
   gl.uniform2f(pr.uOff, 0, 0); gl.uniform1f(pr.uIsLine, pr === LNS ? 1 : 0); gl.uniform1f(pr.uView, view); gl.uniform1f(pr.uLineGain, 1);
+  gl.uniform1f(pr.uListen, cur.listen); gl.uniform1f(pr.uOrbitW, Math.max(cur.orbit, sweepW)); gl.uniform1f(pr.uOrbit, orbitAng);
+  gl.uniform1f(pr.uPulseR, pulseR); gl.uniform1f(pr.uPulseA, pulseA);
 }
 function drawScene(tl, lv, glow) {
   const px = H * DPR / 760 / (glow ? 4 : 1), off = 2 / (H * DPR);
@@ -410,11 +419,15 @@ function frame(now) {
   const tl = timeline(), lv = Math.min(1, (phase === 'on' ? level : 0) + flash * 0.3);
   spinAng += dt * cur.spin; ringAng += dt * cur.ring; coreClock += dt * cur.core * (1 + lv * 0.6); gaugeClock += dt * (0.4 + cur.spin * 2);
   rotW = mat(spinAng, 0.3); rotZ = matZ(ringAng);
+  orbitAng += dt * cur.orbitSpeed;
+  const sw = (T - sweepAt) / 1.3;   // waking up: one glint sweeps all the way round the ring
+  if (sw > 0 && sw < 1) { sweepW = Math.sin(Math.PI * sw) * 0.9; if (cur.orbit < 0.05) orbitAng = Math.PI * 0.5 + sw * Math.PI * 2; } else sweepW = 0;
+  if (pulse) { const k = (T - pulse.at) / pulse.secs; if (k >= 1) { pulse = null; pulseA = 0; } else { pulseR = pulse.from + (pulse.to - pulse.from) * ease(k); pulseA = pulse.strength * Math.sin(Math.PI * Math.min(1, k * 1.15)); } }
   gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.viewport(0, 0, cv.width, cv.height); gl.clear(gl.COLOR_BUFFER_BIT);
   const R = H * 0.35, cx = W / 2, cy = H / 2;
-  drawBack(R, cx, cy, tl.hud);
+  drawBack();
   if (phase !== 'off') {
-    updateLive(coreClock, lv, Math.max(0.0001, tl.core), tl.arcs);
+    updateLive(coreClock, lv, Math.max(0.0001, tl.core * (1 + cur.beat * lv * 0.16)), tl.arcs);
     const bw = Math.max(1, Math.round(cv.width / 4)), bh = Math.max(1, Math.round(cv.height / 4));
     if (!BA || BA.w !== bw || BA.h !== bh) { BA = renderTarget(bw, bh); BB = renderTarget(bw, bh); }
     gl.bindFramebuffer(gl.FRAMEBUFFER, BA.f); gl.viewport(0, 0, bw, bh); gl.clear(gl.COLOR_BUFFER_BIT);

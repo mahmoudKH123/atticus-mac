@@ -2726,7 +2726,7 @@ final class App: NSObject, WKScriptMessageHandler {
     }
     // JARVIS mode: the voice starts on the reply's first finished sentence ("♪" lines) and the rest follows as it is written.
     lazy var face = JarvisFace()
-    var kokoroCheckedAt = Date(), micLevel = 0.0, jarvisVoiceLevel = 0.0, jarvisVoiceAt = Date.distantPast, jarvisActiveAt = Date.distantPast, faceState = "", jarvisApproval = false
+    var jarvisStepAt = Date.distantPast, kokoroCheckedAt = Date(), micLevel = 0.0, jarvisVoiceLevel = 0.0, jarvisVoiceAt = Date.distantPast, jarvisActiveAt = Date.distantPast, faceState = "", jarvisApproval = false
     func jarvisTick() {   // 30 times a second: wake or sleep the face, and give it the state and the voice's loudness
         let on = Prefs.bool("jarvis")
         if on || bargeRequest != nil { bargeTick() }
@@ -2742,7 +2742,7 @@ final class App: NSObject, WKScriptMessageHandler {
             if !face.shown { face.wake(); faceState = "" }
         } else if face.shown && Date().timeIntervalSince(jarvisActiveAt) > 1.2 { face.sleep(); return }
         guard face.shown else { return }
-        let state = speaking ? "speak" : engine.isRunning ? "listen" : busy ? "think" : "idle"
+        let state = speaking ? "speak" : engine.isRunning ? "listen" : busy ? (Date().timeIntervalSince(jarvisStepAt) < 3 ? "work" : "think") : "idle"
         if state != faceState { faceState = state; face.run("jarvis.state('\(state)')") }
         let level = speaking ? (Date().timeIntervalSince(jarvisVoiceAt) < 0.3 ? jarvisVoiceLevel : 0) : engine.isRunning ? micLevel : 0
         face.run(String(format: "jarvis.level(%.3f)", level))
@@ -4015,6 +4015,7 @@ final class App: NSObject, WKScriptMessageHandler {
         busy = true
         if dictating { cue("soundRelease"); js("finishing", dictateCleanup ? "Cleaning up…" : "") }
         else if offerText == nil { js("think"); jarvisFiller() }   // card replies keep the response clock paused
+        if Prefs.bool("jarvis") && !dictating { face.run("jarvis.heard()") }   // the face shows it heard him
         let an = analyzer, rd = reading, next = nextAnalyzer
         nextReading?.cancel(); nextFeed = nil; nextAnalyzer = nil; nextReading = nil; nextSpeechInputID = nil; nextSpeechSegment = 0
         Task { await next?.cancelAndFinishNow() }
@@ -4509,6 +4510,7 @@ final class App: NSObject, WKScriptMessageHandler {
                         self.mini.finish(); self.answer = "✓ " + (guided ? finish : result); self.js("line", self.answer)
                         self.deliver(guided ? finish : result, aloud: !guided); continue   // after the line: finding the read-aloud voice must not delay the answer; a guide's steps speak for themselves
                     }
+                    if line.hasPrefix("▸ "), Prefs.bool("jarvis") { self.jarvisStepAt = Date(); self.face.run("jarvis.step()") }   // the face pulses on each task step
                     if line.hasPrefix("♪ ") { self.jarvisSpeakLive(String(line.dropFirst(2))); continue }
                     if line == "⏻" { if Prefs.bool("jarvis") { self.handsFree = false; self.followUp = false }; continue }   // JARVIS heard a sign-off: no listening after this reply
                     if line.hasPrefix("! ") { self.js("msg", String(line.dropFirst(2))) }
@@ -5716,9 +5718,31 @@ func jarvisOpen(_ file: String) -> AVAudioFile? {
     return try? AVAudioFile(forReading: URL(fileURLWithPath: file))
 }
 // JARVIS mode's quick replies the moment Mahmoud stops talking: for a question, a task, anything else.
-let jarvisFillers = [["Let me check.", "Hmm, let me see.", "One sec.", "Let me think.", "Good question, one sec."],
+let jarvisFillers = [["Let me check.", "Let me see.", "One sec.", "Let me think.", "Good question, one sec."],   // no "hmm": Kokoro can't say it
                      ["On it.", "Sure.", "Right away.", "Okay, on it.", "Sure thing."],
-                     ["Mm-hm.", "Right.", "Okay.", "Got it.", "Hmm."]]
+                     ["Yeah.", "Right.", "Okay.", "Got it.", "Alright."]]
+// Kokoro reads some text badly ("hmm" came out as "hmmeehh"): spell those the way it says them right. Kokoro only.
+func jarvisKokoroText(_ text: String) -> String {
+    var t = text
+    let fixes: [(String, String)] = [
+        (#"(?i)\b(?:mm+-?hm+|uh-?huh)\b[,.!]?"#, "yeah,"), (#"(?i)\b(?:h?m{2,}|hm+|um+|uh+|erm+)\b[,.!]?\s*"#, ""),   // sounds it can't make
+        (#"(?i)\bhttps?://(?:www\.)?"#, ""),
+        (#"\b([A-Za-z0-9-]+)\.([A-Za-z0-9-]+)\.(com|org|net|io|dev|ai|co|uk|eg|app)\b"#, "$1 dot $2 dot $3"),
+        (#"\b([A-Za-z0-9-]+)\.(com|org|net|io|dev|ai|co|uk|eg|app)\b"#, "$1 dot $2"),
+        (#"(\d)\s?%"#, "$1 per cent"), (#"(\d)\s?°\s?C\b"#, "$1 degrees"), (#"(\d)\s?°"#, "$1 degrees"),
+        (#"(?i)\be\.g\."#, "for example"), (#"(?i)\bi\.e\."#, "that is"), (#"\s&\s"#, " and "), (#"\bvs\.?\s"#, "versus "), (#"~\s?(\d)"#, "about $1"),
+        (#"\bOK\b"#, "okay"), (#"\bAPIs\b"#, "A P I's"), (#"\biOS\b"#, "eye O S"), (#"\bmacOS\b"#, "mac O S"),
+    ]
+    for (pattern, with) in fixes { t = t.replacingOccurrences(of: pattern, with: with, options: .regularExpression) }
+    // short capitals are initials (AI, ECS, AWS, URL): letter by letter, unless they're said as a word
+    let words: Set<String> = ["NASA", "SIM", "PIN", "RAM", "GIF", "JPEG", "LAN", "WAN", "SaaS", "DNS"]
+    let caps = try! NSRegularExpression(pattern: #"\b[A-Z]{2,4}\b"#)
+    for m in caps.matches(in: t, range: NSRange(t.startIndex..., in: t)).reversed() {
+        guard let r = Range(m.range, in: t), !words.contains(String(t[r])) else { continue }
+        t.replaceSubrange(r, with: t[r].map(String.init).joined(separator: " "))
+    }
+    return t.replacingOccurrences(of: #"\s{2,}"#, with: " ", options: .regularExpression).trimmingCharacters(in: .whitespaces)
+}
 // Short lines are kept as rendered audio (per voice and speed), so "On it." plays at once instead of waiting on the model.
 func jarvisKokoroCachePath(_ words: String, rate: Double) -> String? {
     let key = words.lowercased().unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) }.map(String.init).joined()
@@ -5735,7 +5759,7 @@ func jarvisKokoroPrerender(rate: Double) {   // --jarvis-warm: render the quick 
         guard let cache = jarvisKokoroCachePath(words, rate: rate), !FileManager.default.fileExists(atPath: cache) else { continue }
         var fd = jarvisKokoroConnect(); let deadline = Date().addingTimeInterval(40)
         while fd == nil && Date() < deadline { usleep(250_000); fd = jarvisKokoroConnect() }
-        guard let fd, let request = try? JSONSerialization.data(withJSONObject: ["text": words, "voice": Prefs.str("jarvisKokoroVoice"), "speed": rate / 180]) else { return }
+        guard let fd, let request = try? JSONSerialization.data(withJSONObject: ["text": jarvisKokoroText(words), "voice": Prefs.str("jarvisKokoroVoice"), "speed": rate / 180]) else { return }
         _ = (request + Data("\n".utf8)).withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
         var buffer = Data(), chunk = [UInt8](repeating: 0, count: 4096)
         while true {
@@ -5763,7 +5787,7 @@ func jarvisKokoroSpeak(_ words: String, rate: Double, into out: JarvisPlayer) ->
     }
     guard let fd else { return false }
     defer { close(fd) }
-    guard let request = try? JSONSerialization.data(withJSONObject: ["text": words, "voice": Prefs.str("jarvisKokoroVoice"), "speed": rate / 180]) else { return false }
+    guard let request = try? JSONSerialization.data(withJSONObject: ["text": jarvisKokoroText(words), "voice": Prefs.str("jarvisKokoroVoice"), "speed": rate / 180]) else { return false }
     let sent = (request + Data("\n".utf8)).withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
     guard sent > 0 else { return false }
     var buffer = Data(), played = 0, chunk = [UInt8](repeating: 0, count: 4096)

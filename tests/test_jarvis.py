@@ -218,7 +218,7 @@ class JarvisResponsivenessTests(unittest.TestCase):
         from tests import run_swift
         body = 'import Foundation\n' + self.helper('let jarvisFillers = ', '// Short lines are kept') + 'struct A {\n' + self.helper('    static func jarvisFillerLine(', '    // A voice started while he talks') + '}\n'
         cases = {'Jarvis, can you open Spotify': 'On it.', "what's the weather like": 'Let me check.', 'is it going to rain?': 'Let me check.',
-                 'nice one': 'Mm-hm.', 'could you please download GitHub Desktop': 'On it.'}
+                 'nice one': 'Yeah.', 'could you please download GitHub Desktop': 'On it.'}
         body += ''.join(f'print(A.jarvisFillerLine({json.dumps(k)}, pick: 0))\n' for k in cases)
         self.assertEqual(run_swift(self, body).strip().split('\n'), list(cases.values()))
 
@@ -257,6 +257,28 @@ class JarvisResponsivenessTests(unittest.TestCase):
         self.assertIn('followUp = true; return wakeTick()', review)
         self.assertIn('hush(); js("msg", message)', review)   # everyone else: the review box as before
         self.assertIn('("typing", composing && !(Prefs.bool("jarvis") && handsFree && !panel.isVisible)),', app)
+
+    def test_kokoro_words_are_spelled_the_way_it_says_them(self):
+        from tests import run_swift
+        app = self.source()
+        body = 'import Foundation\n' + app[app.index('func jarvisKokoroText('):app.index('// Short lines are kept')]
+        cases = {'Hmm, let me see.': 'let me see.', 'Mm-hm.': 'yeah,', "I've opened desktop.github.com for you.": "I've opened desktop dot github dot com for you.",
+                 "Battery's at 82% and it's 17°C.": "Battery's at 82 per cent and it's 17 degrees.", 'Your ECS pipeline and the AI are fine.': 'Your E C S pipeline and the A I are fine.',
+                 'OK, sorted.': 'okay, sorted.', 'Check DNS on youtube.com.': 'Check DNS on youtube dot com.'}
+        body += ''.join(f'print(jarvisKokoroText({json.dumps(k, ensure_ascii=False)}))\n' for k in cases)
+        self.assertEqual(run_swift(self, body).strip().split('\n'), list(cases.values()))
+        self.assertNotIn('Hmm', app[app.index('let jarvisFillers = '):app.index('// Kokoro reads some text badly')])
+
+    def test_face_feels_alive_without_changing_the_look(self):
+        page = open(os.path.join(os.path.dirname(__file__), '..', 'ui', 'jarvis.html')).read()
+        back = page[page.index('function drawBack('):page.index('function drawHud(')]
+        self.assertNotIn('arc(', back)   # the outer disc and its rim are gone
+        for api in ("heard() {", "step() {", "work:   {"):
+            self.assertIn(api, page)
+        app = self.source()
+        self.assertIn('if Prefs.bool("jarvis") && !dictating { face.run("jarvis.heard()") }', app)
+        self.assertIn('if line.hasPrefix("▸ "), Prefs.bool("jarvis") { self.jarvisStepAt = Date(); self.face.run("jarvis.step()") }', app)
+        self.assertIn('busy ? (Date().timeIntervalSince(jarvisStepAt) < 3 ? "work" : "think") : "idle"', app)
 
 
 if __name__ == '__main__':

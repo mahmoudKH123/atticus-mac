@@ -2758,7 +2758,7 @@ final class App: NSObject, WKScriptMessageHandler {
         }
     }
     var jarvisLive: Process?, jarvisLiveIn: FileHandle?, jarvisVoiced = ""
-    func jarvisSpeakLive(_ sentence: String, track: Bool = true) {   // track: false for the quick "On it.", which is not part of the reply
+    func jarvisSpeakLive(_ sentence: String, track: Bool = true) {   // track: false for what is not part of the reply
         guard Prefs.bool("jarvis"), Prefs.bool("speak"), let me = Bundle.main.executableURL else { return }
         if jarvisLive == nil || voice !== jarvisLive || jarvisLive?.isRunning != true {   // this reply's first sentence
             stopWake(); shush()
@@ -2769,22 +2769,13 @@ final class App: NSObject, WKScriptMessageHandler {
         if track { jarvisVoiced += " " + sentence }
         jarvisLiveWrite(sentence)
     }
-    // JARVIS mode: the moment he stops talking, a quick spoken "On it." / "Let me check." fills the gap while the reply is
-    // written; the reply's sentences queue right behind it on the same voice.
-    func jarvisFiller() {
+    // JARVIS mode: the moment he stops talking, a soft "got it" tone (the same every time, so it always fits) while the
+    // reply is written; the reply's sentences queue right behind it on the same voice.
+    func jarvisGotIt() {
         let heard = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard Prefs.bool("jarvis"), Prefs.bool("speak"), handsFree, offerText == nil, !heard.isEmpty, !Self.endsJarvisChat(heard) else { return }
-        jarvisSpeakLive(Self.jarvisFillerLine(heard), track: false)
-    }
-    static func jarvisFillerLine(_ text: String, pick: Int = Int.random(in: 0..<1000)) -> String {
-        let skip: Set<String> = ["jarvis", "hey", "okay", "ok", "so", "please", "can", "could", "would", "will", "you", "just", "now", "and", "um", "uh", "right", "alright"]
-        let words = text.lowercased().replacingOccurrences(of: "\u{2019}", with: "'").components(separatedBy: CharacterSet.letters.union(CharacterSet(charactersIn: "'")).inverted).filter { !$0.isEmpty }
-        let first = words.first { !skip.contains($0) } ?? ""
-        let asks: Set<String> = ["what", "what's", "whats", "who", "who's", "where", "where's", "when", "why", "how", "how's", "is", "are", "do", "does", "did", "which", "whose", "tell", "explain", "any", "should", "was", "were", "have", "has"]
-        let does: Set<String> = ["open", "close", "play", "pause", "stop", "move", "put", "send", "download", "find", "search", "show", "turn", "set", "make", "create", "add", "delete", "remove",
-            "start", "run", "go", "take", "check", "read", "write", "reply", "call", "mute", "unmute", "skip", "resume", "launch", "quit", "switch", "book", "schedule", "remind", "save", "copy", "paste", "type", "draft", "get", "bring", "clear", "minimize", "maximize"]
-        let lines = asks.contains(first) || text.hasSuffix("?") ? jarvisFillers[0] : does.contains(first) ? jarvisFillers[1] : jarvisFillers[2]
-        return lines[pick % lines.count]
+        jarvisSpeakLive("", track: false)   // starts (or reuses) the live voice; an empty line is not written
+        try? jarvisLiveIn?.write(contentsOf: Data((jarvisToneLine + "\n").utf8))
     }
     // A voice started while he talks (its sound output already running), so the first words play the instant he stops.
     var jarvisSpare: (p: Process, input: FileHandle)?
@@ -4014,7 +4005,7 @@ final class App: NSObject, WKScriptMessageHandler {
         clickTalk = false; toggleTalk = false; quiet?.cancel()
         busy = true
         if dictating { cue("soundRelease"); js("finishing", dictateCleanup ? "Cleaning up…" : "") }
-        else if offerText == nil { js("think"); jarvisFiller() }   // card replies keep the response clock paused
+        else if offerText == nil { js("think"); jarvisGotIt() }   // card replies keep the response clock paused
         if Prefs.bool("jarvis") && !dictating { face.run("jarvis.heard()") }   // the face shows it heard him
         let an = analyzer, rd = reading, next = nextAnalyzer
         nextReading?.cancel(); nextFeed = nil; nextAnalyzer = nil; nextReading = nil; nextSpeechInputID = nil; nextSpeechSegment = 0
@@ -5560,7 +5551,7 @@ for _ in range(80):   # an old copy whose app just quit lets go within 15 s: tak
     try: fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB); break
     except OSError: time.sleep(0.25)
 else: sys.exit(0)
-import soundfile as sf
+import numpy as np, soundfile as sf
 from kokoro_onnx import Kokoro
 out = home + '/out'; os.makedirs(out, mode=0o700, exist_ok=True)
 for f in os.listdir(out): os.unlink(os.path.join(out, f))
@@ -5594,6 +5585,8 @@ while True:
             else: merged.append(p)
         for part in merged:
             audio, rate = k.create(part, voice=req['voice'], speed=float(req['speed']), lang='en-gb')
+            loud = np.flatnonzero(np.abs(audio) > 0.01)   # its own ~0.15 s of quiet around each sentence made gaps
+            if len(loud): audio = audio[max(0, loud[0] - int(rate * 0.02)):loud[-1] + int(rate * 0.06)]
             n += 1; name = f'{out}/{os.getpid()}-{n}.wav'; sf.write(name, audio, rate)
             f.write((name + '\\n').encode()); f.flush()
         f.write(b'done\\n'); f.flush()
@@ -5641,6 +5634,7 @@ func jarvisKokoroWarm(app: Int32) {
 // Plays voice files one after another through the JARVIS chain (optional pitch, filter, room).
 final class JarvisPlayer {
     let engine = AVAudioEngine(), player = AVAudioPlayerNode(), convert = AVAudioMixerNode()
+    let chime = AVAudioPlayerNode(), chimeFile = try? AVAudioFile(forReading: URL(fileURLWithPath: dir + "/ui/jarvis-tone.wav"))   // the "got it" sound, on its own channel
     var format: AVAudioFormat?, pending = 0, silent = false   // silent: no working sound output, so nothing is tried again
     let lock = NSLock(), finished = DispatchSemaphore(value: 0)
     func add(_ audio: AVAudioFile, gap: Double) -> Bool {
@@ -5681,6 +5675,7 @@ final class JarvisPlayer {
             guard let standard = AVAudioFormat(standardFormatWithSampleRate: 44100, channels: 2) else { return false }
             ([player, convert] + effects).forEach { engine.attach($0) }
             engine.connect(player, to: convert, format: voiceFormat)
+            if let chimeFile { engine.attach(chime); engine.connect(chime, to: convert, fromBus: 0, toBus: convert.nextAvailableInputBus, format: chimeFile.processingFormat) }
             let chain: [AVAudioNode] = [convert] + effects
             for (a, b) in zip(chain, chain.dropFirst()) { engine.connect(a, to: b, format: standard) }
             engine.connect(chain.last!, to: engine.mainMixerNode, format: standard)
@@ -5704,6 +5699,17 @@ final class JarvisPlayer {
         }
         return true
     }
+    // JARVIS's "got it" sound (ui/jarvis-tone.wav). Its own player, so his reply can start over its soft tail.
+    func tone() {
+        if silent { return }
+        if format == nil, let start = AVAudioFormat(standardFormatWithSampleRate: 24000, channels: 1), !prime(start) { return }
+        guard let chimeFile, chime.engine != nil else { return }
+        lock.lock(); pending += 1; lock.unlock()
+        chime.scheduleFile(chimeFile, at: nil, completionCallbackType: .dataPlayedBack) { [self] _ in
+            lock.lock(); pending -= 1; lock.unlock(); finished.signal()
+        }
+        chime.play()
+    }
     func silence(_ seconds: Double) {
         guard let format, let gap = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(format.sampleRate * seconds)) else { return }
         gap.frameLength = gap.frameCapacity; player.scheduleBuffer(gap)
@@ -5717,10 +5723,10 @@ func jarvisOpen(_ file: String) -> AVAudioFile? {
     defer { try? FileManager.default.removeItem(atPath: file) }   // the open file stays readable; nothing is left behind
     return try? AVAudioFile(forReading: URL(fileURLWithPath: file))
 }
-// JARVIS mode's quick replies the moment Mahmoud stops talking: for a question, a task, anything else.
-let jarvisFillers = [["Let me check.", "Let me see.", "One sec.", "Let me think.", "Good question, one sec."],   // no "hmm": Kokoro can't say it
-                     ["On it.", "Sure.", "Right away.", "Okay, on it.", "Sure thing."],
-                     ["Yeah.", "Right.", "Okay.", "Got it.", "Alright."]]
+// Common short replies, rendered ahead so they play at once. No "hmm": Kokoro can't say it.
+let jarvisShortReplies = ["Done.", "Sorted.", "On it.", "All done.", "No worries.", "Yep.", "Shall I go ahead?"]
+// The voice helper's cue for the "got it" tone (not words to speak).
+let jarvisToneLine = "\u{266B}tone"
 // Kokoro reads some text badly ("hmm" came out as "hmmeehh"): spell those the way it says them right. Kokoro only.
 func jarvisKokoroText(_ text: String) -> String {
     var t = text
@@ -5755,7 +5761,7 @@ func jarvisKokoroKeep(_ file: String, as cache: String?) {
     try? FileManager.default.copyItem(atPath: file, toPath: cache)
 }
 func jarvisKokoroPrerender(rate: Double) {   // --jarvis-warm: render the quick replies once the service is up
-    for words in jarvisFillers.joined() {
+    for words in jarvisShortReplies {
         guard let cache = jarvisKokoroCachePath(words, rate: rate), !FileManager.default.fileExists(atPath: cache) else { continue }
         var fd = jarvisKokoroConnect(); let deadline = Date().addingTimeInterval(40)
         while fd == nil && Date() < deadline { usleep(250_000); fd = jarvisKokoroConnect() }
@@ -5777,7 +5783,7 @@ func jarvisKokoroSpeak(_ words: String, rate: Double, into out: JarvisPlayer) ->
     let cache = jarvisKokoroCachePath(words, rate: rate)
     if let cache, FileManager.default.fileExists(atPath: cache) {
         let copy = NSTemporaryDirectory() + "atticus-jarvis-\(getpid())-\(UUID().uuidString).wav"
-        if (try? FileManager.default.copyItem(atPath: cache, toPath: copy)) != nil, let audio = jarvisOpen(copy), out.add(audio, gap: out.format != nil ? 0.12 : 0) { return true }
+        if (try? FileManager.default.copyItem(atPath: cache, toPath: copy)) != nil, let audio = jarvisOpen(copy), out.add(audio, gap: out.format != nil ? 0.08 : 0) { return true }
     }
     var fd = jarvisKokoroConnect()
     if fd == nil {   // not running yet: start it and wait for the model to load
@@ -5800,7 +5806,7 @@ func jarvisKokoroSpeak(_ words: String, rate: Double, into out: JarvisPlayer) ->
             if line == "done" { return played > 0 }
             guard line.hasPrefix(jarvisKokoroHome + "/out/") else { continue }
             if played == 0 && words.range(of: #"[.!?;:]\s+\S"#, options: .regularExpression) == nil { jarvisKokoroKeep(line, as: cache) }   // one part: safe to keep
-            guard let audio = jarvisOpen(line), out.add(audio, gap: played > 0 || out.format != nil ? 0.12 : 0) else { continue }
+            guard let audio = jarvisOpen(line), out.add(audio, gap: played > 0 || out.format != nil ? 0.08 : 0) else { continue }
             played += 1
         }
     }
@@ -5832,7 +5838,10 @@ if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--jarvis-say" 
         // Started ahead while Mahmoud talks: get the sound output running in Kokoro's format now, so the first line plays at once
         if jarvisKokoroReady(), let name = (try? FileManager.default.contentsOfDirectory(atPath: jarvisKokoroHome + "/cache"))?.first(where: { $0.hasSuffix(".wav") }),
            let sample = try? AVAudioFile(forReading: URL(fileURLWithPath: jarvisKokoroHome + "/cache/" + name)) { _ = out.prime(sample.processingFormat) }
-        while let line = readLine() { if !line.trimmingCharacters(in: .whitespaces).isEmpty { _ = speak(line) } }
+        while let line = readLine() {
+            if line == jarvisToneLine { out.tone() }   // the "got it" chime the moment he stops talking
+            else if !line.trimmingCharacters(in: .whitespaces).isEmpty { _ = speak(line) }
+        }
     } else if !speak(words) { exit(1) }
     out.finish()
     exit(0)

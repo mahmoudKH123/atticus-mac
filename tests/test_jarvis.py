@@ -214,13 +214,14 @@ class JarvisResponsivenessTests(unittest.TestCase):
     def helper(self, start, end):
         app = self.source(); return app[app.index(start):app.index(end)]
 
-    def test_filler_fits_what_he_said(self):
-        from tests import run_swift
-        body = 'import Foundation\n' + self.helper('let jarvisFillers = ', '// Short lines are kept') + 'struct A {\n' + self.helper('    static func jarvisFillerLine(', '    // A voice started while he talks') + '}\n'
-        cases = {'Jarvis, can you open Spotify': 'On it.', "what's the weather like": 'Let me check.', 'is it going to rain?': 'Let me check.',
-                 'nice one': 'Yeah.', 'could you please download GitHub Desktop': 'On it.'}
-        body += ''.join(f'print(A.jarvisFillerLine({json.dumps(k)}, pick: 0))\n' for k in cases)
-        self.assertEqual(run_swift(self, body).strip().split('\n'), list(cases.values()))
+    def test_got_it_tone_is_the_same_every_time(self):
+        app = self.source()
+        tone = self.helper('    func tone() {', '    func silence(_ seconds: Double) {')
+        self.assertIn('chime.scheduleFile(chimeFile', tone)   # its own player: the reply can start over the tail
+        self.assertTrue(os.path.getsize(os.path.join(os.path.dirname(__file__), '..', 'ui', 'jarvis-tone.wav')) < 400_000)
+        self.assertIn('ui/jarvis-tone.wav', open(os.path.join(os.path.dirname(__file__), '..', 'build.sh')).read())
+        self.assertIn('if line == jarvisToneLine { out.tone() }', app)   # played by the live voice, so the reply follows on the same output
+        self.assertNotIn('jarvisFillerLine', app)
 
     def test_unfinished_sentences_get_more_time(self):
         from tests import run_swift
@@ -232,10 +233,10 @@ class JarvisResponsivenessTests(unittest.TestCase):
 
     def test_filler_is_jarvis_hands_free_only_and_not_part_of_the_reply(self):
         app = self.source()
-        self.assertIn('else if offerText == nil { js("think"); jarvisFiller() }', app)
-        filler = self.helper('    func jarvisFiller() {', '    static func jarvisFillerLine(')
+        self.assertIn('else if offerText == nil { js("think"); jarvisGotIt() }', app)
+        filler = self.helper('    func jarvisGotIt() {', '    // A voice started while he talks')
         self.assertIn('guard Prefs.bool("jarvis"), Prefs.bool("speak"), handsFree, offerText == nil, !heard.isEmpty, !Self.endsJarvisChat(heard)', filler)
-        self.assertIn('track: false', filler)   # deliver() must not mistake it for the start of the reply
+        self.assertIn('jarvisSpeakLive("", track: false)', filler)   # deliver() must not mistake it for the start of the reply
         self.assertIn('if track { jarvisVoiced += " " + sentence }', app)
         self.assertIn('func endPause() -> Double { Prefs.bool("jarvis") ? (Self.soundsUnfinished(text) ? 3.0 : 1.5) : 1.3 }', app)   # upstream keeps 1.3 s
         self.assertIn('never open with another acknowledgement', atticus.JARVIS)
@@ -267,7 +268,7 @@ class JarvisResponsivenessTests(unittest.TestCase):
                  'OK, sorted.': 'okay, sorted.', 'Check DNS on youtube.com.': 'Check DNS on youtube dot com.'}
         body += ''.join(f'print(jarvisKokoroText({json.dumps(k, ensure_ascii=False)}))\n' for k in cases)
         self.assertEqual(run_swift(self, body).strip().split('\n'), list(cases.values()))
-        self.assertNotIn('Hmm', app[app.index('let jarvisFillers = '):app.index('// Kokoro reads some text badly')])
+        self.assertNotIn('Hmm', app[app.index('let jarvisShortReplies'):app.index('// Kokoro reads some text badly')])
 
     def test_face_feels_alive_without_changing_the_look(self):
         page = open(os.path.join(os.path.dirname(__file__), '..', 'ui', 'jarvis.html')).read()

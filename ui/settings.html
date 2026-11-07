@@ -339,6 +339,13 @@
     <h3>Answers</h3>
     <div class="group">
       <div class="row"><div class="t"><b>Show answers</b><span>Word by word as Atticus writes, or all at the end.</span></div><div class="seg" data-k="showAnswers"><button data-v="stream">As they arrive</button><button data-v="once">All at once</button></div></div>
+      <div class="row"><div class="t"><b>JARVIS mode</b><span>Casual, friendly British assistant persona. Off keeps Atticus exactly as is.</span></div><label class="sw"><input type="checkbox" data-k="jarvis"></label></div>
+      <div class="row"><div class="t"><b>JARVIS voice</b><span>Kokoro is the natural on-device voice; Apple is the built-in backup.</span></div><div class="seg" data-k="jarvisEngine"><button data-v="kokoro">Kokoro</button><button data-v="apple">Apple</button></div></div>
+      <div class="row"><div class="t"><b>JARVIS voice speed</b><span>Words per minute.</span></div><input type="range" min="140" max="220" step="2" data-k="jarvisRate"><span class="val" id="jrv"></span></div>
+      <div class="row"><div class="t"><b>JARVIS voice pitch</b><span>0 is the clean, natural voice.</span></div><input type="range" min="-150" max="150" step="10" data-k="jarvisPitch"><span class="val" id="jpv"></span></div>
+      <div class="row"><div class="t"><b>AI voice effect</b><span>A light filter and room.</span></div><label class="sw"><input type="checkbox" data-k="jarvisEffect"></label></div>
+      <div class="row"><div class="t"><b>Double clap to wake</b><span>Clap twice to start talking to JARVIS. Runs on this Mac.</span></div><label class="sw"><input type="checkbox" data-k="jarvisClap"></label></div>
+      <div class="row"><div class="t"><b>Test JARVIS voice</b><span>Plays one sample with these settings.</span></div><button class="btn" id="jarvisTest">Test voice</button></div>
       <div class="row"><div class="t"><b>Read answers aloud</b><span>Esc stops it.</span></div><label class="sw"><input type="checkbox" data-k="speak"></label></div>
       <div class="row"><div class="t"><b>Draw on screen to show you</b><span>Esc clears. To mark a spot yourself, use Point at your screen.</span></div><label class="sw"><input type="checkbox" data-k="draw" aria-label="Draw on screen to show you"></label></div>
     </div>
@@ -639,6 +646,7 @@
   document.querySelectorAll('.seg[data-k]').forEach(g => g.querySelectorAll('button').forEach(b => b.onclick = () => set(g.dataset.k, b.dataset.v)));
   document.querySelectorAll('.sw input[data-k]').forEach(i => i.onchange = () => set(i.dataset.k, i.checked));
   document.querySelector('[data-k=wakeWordName]').onchange = e => set('wakeWordName', e.target.value.trim());
+  $('jarvisTest').onclick = e => { e.preventDefault(); post({ do: 'jarvisPreview' }); };
   document.querySelectorAll('input[type=range]').forEach(r => {
     r.oninput = () => { P[r.dataset.k] = +r.value; paint(); };
     r.onchange = () => { set(r.dataset.k, +r.value); if (r.dataset.k === 'volume') post({ do: 'preview', sound: P.soundDone === 'None' ? 'Glass' : P.soundDone }); };
@@ -695,6 +703,9 @@
     document.querySelectorAll('input[type=range]').forEach(r => r.value = P[r.dataset.k]);
     document.querySelectorAll('[data-w]').forEach(r => r.hidden = P.speechModel !== 'whisper'); paintWhisper();
     $('volv').textContent = Math.round(P.volume / .6 * 100) + '%';
+  $('jrv').textContent = P.jarvisRate; $('jpv').textContent = (P.jarvisPitch > 0 ? '+' : '') + P.jarvisPitch;
+  ['jarvisRate', 'jarvisPitch', 'jarvisEffect', 'jarvisClap'].forEach(k => dim(k, !P.jarvis));
+  document.querySelector('.seg[data-k=jarvisEngine]').closest('.row').classList.toggle('dim', !P.jarvis);
     $('routingwhy').textContent = WHY[P.routing] || '';
     SERVER.forEach(k => { if (document.activeElement !== $(k)) $(k).value = P[k] || ''; });
     $('agentServerModel').hidden = !P.apiBase || other;

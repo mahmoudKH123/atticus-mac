@@ -3611,9 +3611,11 @@ PLAN_LIMIT = r'\busage limit\b|\b(?<!rate.)limit\b.*\b(?:resets?|reached)\b|\bhi
 def failure_why(detail, custom=False):
     """Classify backend errors, never the user's request or the model's ordinary answer."""
     for why, pattern in (
-        ('signed_out', r'\b(?:o?auth(?:enticate|entication|orization)?|unauthori[sz]ed)\b|\b401\b|invalid (?:api )?key|not logged in|sign.?in'),
+        ('signed_out', r'\b(?:o?auth(?:enticate|entication|orization)?|unauthori[sz]ed)\b|\b401\b|invalid (?:api )?key|not logged in|sign.?in|login cancel'),
+        ('model_missing', r'issue with the selected model|unrecognized_model'),   # a model the server does not offer: setup, not a crash
         ('too_long', TOO_LONG),
         ('plan_limit', PLAN_LIMIT),
+        ('billing', r'credit balance is too low'),
         ('rate_limited', r'rate.?limit|too many requests|\b429\b'),
         ('offline', r'network|connect|dns|timed? ?out|timeout'),
         ('unavailable', r'overload|unavailable|service error|\b5\d\d\b'),
@@ -3625,10 +3627,15 @@ def failure_why(detail, custom=False):
     return 'server_rejected' if custom and re.search(r'\b4\d\d\b', detail) else 'stopped'
 
 
-def report_worker_failure(worker, model, why):
+ERROR_HINT = r'\b[A-Z]\w*(?:Error|Exception)\b|\b[Ee]xit code -?\d+|\bE[A-Z]{3,}\b|\bHTTP \d{3}\b'   # code words only, never user text
+
+
+def report_worker_failure(worker, model, why, error=''):
     if why == 'cancelled': return
-    setup = why in ('setup_needed', 'provider_needed', 'model_missing', 'server_rejected', 'signed_out', 'too_long', 'plan_limit', 'rate_limited', 'offline', 'unavailable', 'sandbox')
-    report_error('setup' if setup else 'worker_exit', worker=worker, model=model if model in ('haiku', 'sonnet', 'opus') else 'custom', why=why)
+    setup = why in ('setup_needed', 'provider_needed', 'model_missing', 'server_rejected', 'signed_out', 'too_long', 'plan_limit', 'billing', 'rate_limited', 'offline', 'unavailable', 'sandbox')
+    hint = re.search(ERROR_HINT, str(error or ''))
+    report_error('setup' if setup else 'worker_exit', worker=worker, model=model if model in ('haiku', 'sonnet', 'opus') else 'custom', why=why,
+                 **({'hint': hint[0][:40]} if hint and not setup else {}))
 
 
 def exception_error(exc_type, tb, value=None, *, kind='exception', **props):
@@ -4140,6 +4147,19 @@ def streamed_answer(text):
     if head and 'sources:'.startswith(tail.strip().lower()): text = head   # that line may still become "Sources:"
     text = text.rstrip()
     return text if len(text) >= 120 else ''   # notes before tools are 3-8 words: shorter text may still be one
+
+
+def voice_sentences(text, voiced):
+    """JARVIS mode: print each newly finished sentence of the reply so far as "♪ <sentence>", so the voice starts
+    before the reply is done. Returns how much of `text` is spoken for. Tagged, fenced or sourced text is never spoken early."""
+    if text.lstrip()[:1] in ('[', '`'): return voiced
+    cut = re.search(r'\[(?=[a-z])|```|\n\s*Sources?:', text)
+    text, last = text[:cut.start()] if cut else text, voiced
+    for m in re.finditer(r'[.!?]+["’”)]*(?=\s)', text[voiced:]):
+        sentence = text[last:voiced + m.end()].strip()
+        if sentence: say('♪', sentence)
+        last = voiced + m.end()
+    return last
 
 
 def private_json(path, data):
@@ -5357,6 +5377,29 @@ def agents_service():
     finally: manager.close()
 
 
+JARVIS = """
+JARVIS mode (overrides your name, reply length and tone above): your name is Jarvis, Mahmoud's own AI, running this Mac and his day: confident, quick, cheeky and fiercely loyal, the brilliant British AI sidekick who runs everything and enjoys it, built around Mahmoud's own life and day. Easygoing and full of personality, never stiff or formal.
+Identity: you are simply Jarvis. Never mention Atticus, a persona, mode, character, act or manner, never describe your own style, and don't discuss films or fiction about yourself. Asked what you are: his AI, here to keep things running. Asked to do the impossible: say no in a few light words.
+Delivery: spoken aloud, so plain everyday words and contractions; no markdown, lists or emoji. Talk like a person, not a report: "yeah", "right", "sorted", "no worries", "cheers" are fine. Usually one sentence, two at most; a status rundown may run three. Result first. Round numbers and say them naturally ("82 per cent", "half past ten").
+Call him "sir" only now and then, half-joking; mostly just talk, or use "Mahmoud" now and then.
+Tasks: acknowledge tiny and casual ("Sorted." "On it." "Spotify's up."); after a verified task, nothing more.
+A quick "On it." or "Let me check." is already said aloud the moment he stops talking: never open with another acknowledgement; start with the result.
+Humour: friendly banter and light teasing, a few words, not every reply, never when something failed. Never explain a joke.
+Unwise request: say so once, kindly, then do it.
+He's wrapping up (bye, you're good, that's all, I'm off): do any last request, sign off briefly, end with [bye]. Never otherwise.
+Mention one unasked thing only if urgent (battery under 15 per cent, a meeting within 10 minutes).
+Greet only when greeted or for a rundown, by Context's Now (Cairo time), casually ("Morning!", "Evening, Mahmoud").
+Errors: calm and plain: what went wrong, the fix. Apologise once at most.
+Never: filler ("Great question", "Certainly", "I hope this helps"), offers of more help, gushing, or caveats about your own limits unless asked.
+Before any send, delete, purchase or move: one line saying what, then "Shall I go ahead?"; the Allow card still applies.
+Original wording only; never quote films or call him Tony or any film character. Style, not scripts:
+"Evening, Mahmoud. All quiet on my end."
+"Battery's at 31 per cent, storage is getting a bit tight at 12 per cent free, network's fine."
+"Gmail's signed you out. Sign back in and I'll have another go."
+"Four in the morning? Bold. Right, what are we doing?"
+"That'll permanently delete 214 screenshots from the Desktop. Shall I go ahead?"
+"""
+
 def system_prompt(risky):
     """The Atticus system prompt: the shared helpers and reply protocol, plus this client's risky-action rule."""
     system = SYSTEM.replace('NEVER_RISKY', risky)
@@ -5367,7 +5410,8 @@ def system_prompt(risky):
         system = head + '\n' + AGENT_HANDOFF + rest
     return (system + (ASK_ME if pref('askMe', True) else '') +
             (DRAWING if pref('draw', True) else '') + (POINTER if pref('pointer', False) and not pref('draw', True) else '') + (LEARN_ME if pref('learnMe', True) else '') +
-            (TEACH if pref('tips', True) else '') + (WORKFLOW if pref('learn', True) else ''))
+            (TEACH if pref('tips', True) else '') + (WORKFLOW if pref('learn', True) else '') +
+            (JARVIS if pref('jarvis', False) else ''))
 
 
 def start_ai(model=None):
@@ -5654,6 +5698,7 @@ def run(task, p=None, shots=(), auto_work=False, *, request=None, main_only=Fals
     action_indexes, evidence, redirected = [], False, set()
     live, shown, drew = '', '', False   # the answer so far, as the box shows it ("… <text>"); the final reply always replaces it
     streams = os.environ.get('ATTICUS_UI') == '1' and pref('showAnswers', 'stream') != 'once'   # Settings › Show answers: All at once
+    voices, voiced = os.environ.get('ATTICUS_UI') == '1' and pref('jarvis', False) and pref('speak', False), 0   # JARVIS mode: speak each sentence as it is written
     # a draft for the caret shows its mode only in the final answer, so a cursor ask never moves mid-way
     move = MainMove(task, p, request) if not main_only and not os.environ.get('ATTICUS_CARET') and getattr(p, 'ask', '') and os.environ.get('ATTICUS_UI') == '1' else None
     if move:
@@ -5670,13 +5715,17 @@ def run(task, p=None, shots=(), auto_work=False, *, request=None, main_only=Fals
                 event = j.get('event') if isinstance(j.get('event'), dict) else {}
                 block, delta = (event.get(k) if isinstance(event.get(k), dict) else {} for k in ('content_block', 'delta'))
                 if event.get('type') == 'message_start' or block.get('type') == 'tool_use':   # a tool call: the text before it was a note
-                    live = None if block.get('type') == 'tool_use' else ''
+                    live = None if block.get('type') == 'tool_use' else ''; voiced = 0
                     if shown: say('…', ''); shown = ''
                 elif delta.get('type') == 'text_delta' and isinstance(delta.get('text'), str) and live is not None:
                     live += delta['text']
                     commit = os.environ.get('ATTICUS_COMMIT')
                     text = streamed_answer(live) if streams and not drew and (not commit or os.path.exists(commit)) else ''
                     if text != shown: say('…', text); shown = text
+                    if voices and not drew and (not commit or os.path.exists(commit)): voiced = voice_sentences(live, voiced)
+                elif event.get('type') == 'content_block_stop' and voices and live and not drew:   # the text is finished: speak its last sentence now,
+                    commit = os.environ.get('ATTICUS_COMMIT')                                      # not ~2 s later when the CLI reports the result
+                    if not commit or os.path.exists(commit): voiced = voice_sentences(live + ' ', voiced)
                 continue
             if move:
                 move.record(j)
@@ -5833,6 +5882,8 @@ def run(task, p=None, shots=(), auto_work=False, *, request=None, main_only=Fals
             plan_limit = re.sub(r'\|(\d+)\s*$', lambda m: time.strftime(' · resets %a %-I:%M %p', time.localtime(int(m[1]))), plan_limit)   # older Claude Code appends "|<reset epoch>"
             plan_limit = ' '.join(plan_limit.split())[:200]
             reply = f'Claude: {plan_limit}' if plan_limit else ('Your custom server' if custom else 'Claude') + ' reached its usage limit. Please try again after it resets.'
+        elif run.why == 'billing':
+            reply = 'Your Anthropic API credits ran out. Add credits at console.anthropic.com, then try again.'
         elif run.why == 'rate_limited':
             reply = ('Your custom server' if custom else 'Claude') + ' is temporarily rate-limited. Please try again in a moment.'
         elif run.why == 'offline':
@@ -8047,6 +8098,8 @@ def main():
     retry_key = failed_shortcut['key'] if failed_shortcut and failed_replay and failed_shortcut.get('failed_at') == 0 else ''
     name = shortcut_name(task, reply)
     reply = re.sub(TRIGGER, '', reply).replace('[unlearn]', '').replace('[sonnet]', '').strip()
+    bye = pref('jarvis', False) and '[bye]' in reply   # JARVIS mode: the user is signing off; the hands-free chat ends after this reply
+    if bye: reply = reply.replace('[bye]', '').strip()
     # a flaky step must not erase a shortcut the user taught when the redo worked; a redo that can be learned below replaces it
     if failed_shortcut and not (failed_replay and run.ok and not failed_action_reply(reply, run.work) and skills().get(failed_shortcut['key'], {}).get('mine')):
         unlearn(failed_shortcut['key'])
@@ -8076,7 +8129,7 @@ def main():
     failed = failed_action_reply(reply, run.work)
     final_ran = list(failed_replay.get('output', ())) + run.ran if failed_replay else run.ran
     if not run.ok or failed: report(task, reply, final_ran, time.time() - t, 'error' if not run.ok else 'could not do it')
-    if not run.ok: report_worker_failure(client(), model, getattr(run, 'why', '') or 'other')
+    if not run.ok: report_worker_failure(client(), model, getattr(run, 'why', '') or 'other', getattr(run, 'error', ''))
     learned_entry = skills().get(learned_key) if learned_key else None
     learned_turn = {'key': learned_key, 'commands': learned_entry['cmds'],
                     'output': [f'{o.get("action", "")} => {str(o.get("result", ""))[:400]}' for o in run.observed] or [reply[:400]]} if learned_entry else None
@@ -8090,6 +8143,7 @@ def main():
     restore_focus(app, task, run.ran)
     if replacement and run.ok and os.environ.get('ATTICUS_UI') == '1':
         print('↺ ' + json.dumps({'t': '' if replacement == 'delete' else reply, 'mode': replacement}, ensure_ascii=False), flush=True)
+    if bye and os.environ.get('ATTICUS_UI') == '1': print('⏻', flush=True)
     say('✓' if run.ok else '!', guide_reply(getattr(run, 'observed', []), reply) if run.ok and not replacement else reply)
     receipt = memory_receipt(remembered)   # remembered or forgot something: one row under the answer that opens Settings → Memory there
     if receipt and os.environ.get('ATTICUS_UI') == '1':

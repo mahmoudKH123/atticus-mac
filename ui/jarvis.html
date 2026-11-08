@@ -46,6 +46,9 @@
   .ccRow > label { flex: 0 0 4.2em; color: rgba(255,145,35,.75); font-size: .74em; letter-spacing: .08em; text-transform: uppercase; padding-top: .35em; }
   .ccPeople { flex: 1; display: flex; flex-wrap: wrap; gap: .35em; min-width: 0; }
   .ccChip { display: inline-flex; gap: .45em; align-items: center; padding: .12em .5em; font-size: .86em; background: rgba(255,145,35,.12); border: 1px solid rgba(255,145,35,.35); color: #fff3dc; max-width: 100%; }
+  .ccChip.unconf { border-style: dashed; border-color: rgba(255,190,90,.9); background: rgba(255,145,35,.05); cursor: default; }
+  .ccChip.unconf::after { content: "?"; color: #ffb347; font-weight: 600; }
+  .ccChip small { color: rgba(255,170,80,.65); font-size: .8em; }
   .ccChip.bad { border-style: dashed; border-color: rgba(255,90,60,.8); color: #ffb9a0; }
   .ccChip i { font-style: normal; color: rgba(255,170,80,.7); cursor: default; }
   .ccChip i:hover { color: #fff3dc; }
@@ -53,6 +56,7 @@
   .ccPeople input { flex: 1; font-size: .9em; padding: .15em 0; }
   #ccSubject { flex: 1; padding: .15em 0; }
   #ccBody { flex: 1; resize: none; min-height: 9em; line-height: 1.45; font-size: .92em; padding: .2em 0; }
+  #ccMore[hidden] { display: none; }
   #ccMore { color: rgba(255,145,35,.6); font-size: .72em; cursor: default; padding-top: .45em; white-space: nowrap; }
   #ccMore:hover { color: #ffdea5; }
   #ccFiles { flex: 1; display: flex; flex-wrap: wrap; gap: .35em; align-items: center; }
@@ -75,11 +79,11 @@
 <canvas id="hud"></canvas>
 <div id="tc"><div id="tcLine"></div><div id="tcList"></div>
   <div id="tcBar"><span id="tcLabel"></span><input id="tcIn" autocomplete="off" autocapitalize="off" spellcheck="false"><span id="tcHint">↵ send · esc</span></div></div>
-<div id="cc"><div id="ccHead"><b>EMAIL</b><span>via Apple Mail · Gmail</span><span id="ccX" title="Close (esc)">✕</span></div>
+<div id="cc"><div id="ccHead"><b id="ccTitle">EMAIL</b><span id="ccVia">via Apple Mail · Gmail</span><span id="ccX" title="Close (esc)">✕</span></div>
   <div class="ccRow" data-k="to"><label>To</label><div class="ccPeople"><input></div><span id="ccMore">CC / BCC</span></div>
   <div class="ccRow" data-k="cc" hidden><label>CC</label><div class="ccPeople"><input></div></div>
   <div class="ccRow" data-k="bcc" hidden><label>BCC</label><div class="ccPeople"><input></div></div>
-  <div class="ccRow"><label>Subject</label><input id="ccSubject" spellcheck="true"></div>
+  <div class="ccRow" data-k="subject"><label>Subject</label><input id="ccSubject" spellcheck="true"></div>
   <div class="ccRow" style="flex:1"><textarea id="ccBody" spellcheck="true"></textarea></div>
   <div class="ccRow"><label>Files</label><div id="ccFiles"><button class="ccBtn" id="ccAttach">+ Attach</button></div></div>
   <div id="ccFoot"><span id="ccMsg"></span><button class="ccBtn" id="ccCancel">Cancel</button><button class="ccBtn" id="ccSend">Send ⌘↵</button></div></div>
@@ -479,14 +483,26 @@ Object.assign(window.jarvis, {
 // The app gets {compose: 'send', draft} only from his own click or ⌘↵ (trusted events), {compose: 'cancel'} on Esc / ✕, {compose: 'attach'} for the file picker.
 const cc = document.getElementById('cc'), ccMsg = document.getElementById('ccMsg'), ccSendB = document.getElementById('ccSend');
 const ccSubject = document.getElementById('ccSubject'), ccBody = document.getElementById('ccBody'), ccFilesEl = document.getElementById('ccFiles');
-let ccPeopleList = [], ccState = { to: [], cc: [], bcc: [], files: [] }, ccSending = false, ccSuggest = { k: '', items: [], sel: -1 };
+let ccPeopleList = [], ccState = { to: [], cc: [], bcc: [], files: [] }, ccSending = false, ccSuggest = { k: '', items: [], sel: -1 }, ccKind = 'email';
 const ccPost = m => { try { window.webkit.messageHandlers.jarvis.postMessage(m); } catch (e) { console.log('compose', JSON.stringify(m)); } };
 const isEmail = v => /^[^\s@<>,;]+@[^\s@<>,;]+\.[^\s@<>,;]+$/.test(v);
+// texts: a phone in full international form; Egyptian 01x and 201x numbers get their +20 (Messages keeps chats under +20…)
+const normPhone = v => { let n = String(v).replace(/[\s\-().]/g, '').replace(/^00/, '+'); if (/^01\d{9}$/.test(n)) n = '+20' + n.slice(1); else if (/^20\d{10}$/.test(n)) n = '+' + n; return n; };
+const isPhone = v => /^\+\d{8,15}$/.test(v);
+const isAddr = v => ccKind !== 'email' ? isPhone(v) : isEmail(v);
+const ccValues = p => ccKind !== 'email' ? p.phones.map(normPhone) : p.emails;
 const ccRow = k => cc.querySelector(`.ccRow[data-k="${k}"]`);
-function ccResolve(v) {   // a contact's name -> their address when there is exactly one
-  v = v.trim().replace(/^.*<([^>]+)>$/, '$1'); if (isEmail(v)) return v;
-  const q = v.toLowerCase(), hits = ccPeopleList.filter(p => p.emails.length && (p.name.toLowerCase() === q || q.split(/\s+/).every(w => p.name.toLowerCase().split(/\s+/).some(n => n.startsWith(w)))));
-  return hits.length === 1 && hits[0].emails.length === 1 ? hits[0].emails[0] : v;
+// A recipient: {v: address or +number, name: contact, heard: what speech recognition wrote when it differs, alts: other matches, ok: he confirmed}.
+// He confirms every one (a click on it, or "yes"); what he types in full or picks from the list counts as confirmed.
+const ccWho = v => (ccPeopleList.find(p => ccValues(p).includes(v)) || {}).name || '';
+function ccResolve(v, ok = false) {   // typed text -> a recipient; a name he typed is matched but still asks to be confirmed
+  if (v && typeof v === 'object') return { v: v.v || '', name: v.name || '', heard: v.heard || '', alts: Array.isArray(v.alts) ? v.alts : [], ok: !!v.ok };
+  v = String(v).trim().replace(/^.*<([^>]+)>$/, '$1');
+  if (ccKind !== 'email' && /^[+\d][\d\s\-().]{6,}$/.test(v)) { const n = normPhone(v); return { v: n, name: ccWho(n), heard: '', alts: [], ok }; }
+  if (isAddr(v)) return { v, name: ccWho(v), heard: '', alts: [], ok };
+  const q = v.toLowerCase(), hits = ccPeopleList.filter(p => ccValues(p).length && (p.name.toLowerCase() === q || q.split(/\s+/).every(w => p.name.toLowerCase().split(/\s+/).some(n => n.startsWith(w)))));
+  const alts = hits.slice(0, 4).map(p => ({ name: p.name, v: [...new Set(ccValues(p))].find(n => /^\+201[0125]\d{8}$/.test(n)) || ccValues(p)[0] }));
+  return hits.length === 1 ? { v: alts[0].v, name: hits[0].name, heard: '', alts: [], ok: false } : { v: '', name: '', heard: v, alts, ok: false };
 }
 function ccPlace() {
   const R = H * 0.35, cx = W / 2, fs = Math.max(13, Math.round(R * 0.036));
@@ -500,14 +516,23 @@ function ccRender() {
   for (const k of ['to', 'cc', 'bcc']) {
     const box = ccRow(k).querySelector('.ccPeople'), input = box.querySelector('input');
     box.querySelectorAll('.ccChip').forEach(c => c.remove());
-    ccState[k].forEach((v, i) => {
-      const c = document.createElement('span'), t = document.createElement('span'), x = document.createElement('i');
-      c.className = 'ccChip' + (isEmail(v) ? '' : ' bad'); c.title = isEmail(v) ? v : 'Not an email address: click to fix';
-      t.textContent = v; x.textContent = '✕'; c.append(t, x); box.insertBefore(c, input);
+    ccState[k].forEach((r, i) => {
+      const c = document.createElement('span'), t = document.createElement('span'), x = document.createElement('i'), good = isAddr(r.v);
+      c.className = 'ccChip' + (!good ? ' bad' : r.ok ? '' : ' unconf');
+      c.title = !good ? (r.alts.length ? 'Which one? Click to pick' : 'Not in your contacts: click to fix') : r.ok ? r.v : 'Click to confirm this is the right person';
+      t.textContent = good ? (r.name ? `${r.name} · ${r.v}` : r.v) : (r.alts.length ? `${r.heard} ▾` : r.heard || r.v);
+      if (r.heard && good) { const h = document.createElement('small'); h.textContent = ` heard “${r.heard}”`; t.append(h); }
+      x.textContent = '✕'; c.append(t, x); box.insertBefore(c, input);
       x.onmousedown = e => { e.preventDefault(); ccState[k].splice(i, 1); ccRender(); };
-      t.onmousedown = e => { if (isEmail(v)) return; e.preventDefault(); ccState[k].splice(i, 1); input.value = v; ccRender(); input.focus(); ccSuggestFor(k); };
+      t.onmousedown = e => {
+        e.preventDefault();
+        if (good && !r.ok) { r.ok = true; return ccRender(); }   // his click: this is the person
+        if (good) return;
+        if (r.alts.length) return ccSuggestFor(k, r.alts.map(a => ({ name: a.name, value: a.v })), i);
+        ccState[k].splice(i, 1); input.value = r.heard || r.v; ccRender(); input.focus(); ccSuggestFor(k);
+      };
     });
-    if (k !== 'to') ccRow(k).hidden = ccRow(k).hidden && !ccState[k].length;
+    if (k !== 'to') ccRow(k).hidden = ccKind !== 'email' || ccRow(k).hidden && !ccState[k].length;
   }
   ccFilesEl.querySelectorAll('.ccChip').forEach(c => c.remove());
   const total = ccState.files.reduce((a, f) => a + (f.size || 0), 0);
@@ -517,22 +542,24 @@ function ccRender() {
     x.onmousedown = e => { e.preventDefault(); ccState.files.splice(i, 1); ccRender(); };
     ccFilesEl.insertBefore(c, document.getElementById('ccAttach'));
   });
-  const all = [...ccState.to, ...ccState.cc, ...ccState.bcc], bad = all.filter(v => !isEmail(v)), big = total > 25 * 1048576;
-  ccSendB.disabled = ccSending || !ccState.to.length && !all.length || bad.length > 0 || big;
-  if (!ccSending && !ccMsg.classList.contains('err')) ccMsg.textContent = big ? 'Over Gmail’s 25 MB' : bad.length ? `Check ${bad.length === 1 ? 'the address' : bad.length + ' addresses'} in red` : !all.length ? 'Who is it to?' : '';
+  const all = [...ccState.to, ...ccState.cc, ...ccState.bcc], bad = all.filter(r => !isAddr(r.v)), unsure = all.filter(r => isAddr(r.v) && !r.ok), big = ccKind === 'email' && total > 25 * 1048576;
+  ccSendB.disabled = ccSending || !all.length || bad.length > 0 || unsure.length > 0 || big;
+  if (!ccSending && !ccMsg.classList.contains('err')) ccMsg.textContent = big ? 'Over Gmail’s 25 MB' : bad.length ? `Pick or fix ${bad.length === 1 ? 'the name' : bad.length + ' names'} in red`
+    : unsure.length ? `Confirm ${unsure.length === 1 ? 'the person' : 'each person'}: click ${unsure.length === 1 ? 'it' : 'them'} or say yes` : !all.length ? 'Who is it to?' : '';
 }
 function ccCommit(k) {   // what is typed in a To/CC/BCC box becomes chips
   const input = ccRow(k).querySelector('input'), parts = input.value.split(/[,;]+/).map(v => v.trim()).filter(Boolean);
   if (!parts.length) return false;
-  ccState[k].push(...parts.map(ccResolve)); input.value = ''; ccCloseSuggest(); ccRender(); return true;
+  ccState[k].push(...parts.map(v => ccResolve(v, isAddr(ccKind !== 'email' && /^[+\d][\d\s\-().]{6,}$/.test(v) ? normPhone(v) : v.trim())))); input.value = ''; ccCloseSuggest(); ccRender(); return true;
 }
-function ccCloseSuggest() { document.getElementById('ccList')?.remove(); ccSuggest = { k: '', items: [], sel: -1 }; }
-function ccSuggestFor(k) {
-  ccCloseSuggest(); const input = ccRow(k).querySelector('input'), q = input.value.trim().toLowerCase(); if (q.length < 2) return;
-  const items = [];
+function ccCloseSuggest() { document.getElementById('ccList')?.remove(); ccSuggest = { k: '', items: [], sel: -1, at: -1 }; }
+function ccSuggestFor(k, given, at = -1) {   // given: the matches for a name that fits several people; at: the chip they replace
+  ccCloseSuggest(); const input = ccRow(k).querySelector('input'), q = input.value.trim().toLowerCase(); if (!given && q.length < 2) return;
+  const items = given ? given.slice(0, 5) : [];
+  if (!given)
   for (const p of ccPeopleList) {
     const byName = p.name.toLowerCase().split(/\s+/).some(w => w.startsWith(q)) || p.name.toLowerCase().startsWith(q);
-    for (const e of p.emails) if (byName || e.toLowerCase().includes(q)) { items.push({ name: p.name, value: e }); if (items.length >= 4) break; }
+    for (const e of new Set(ccValues(p))) if (byName || e.toLowerCase().includes(q) || ccKind !== 'email' && q.replace(/\D/g, '').length >= 3 && e.includes(q.replace(/\D/g, '').replace(/^0/, ''))) { items.push({ name: p.name, value: e }); if (items.length >= 4) break; }
     if (items.length >= 4) break;
   }
   if (!items.length) return;
@@ -542,12 +569,19 @@ function ccSuggestFor(k) {
     d.className = 'tcItem'; b.textContent = it.name; s.textContent = it.value; d.append(b, s);
     d.onmousedown = e => { e.preventDefault(); ccPick(k, i); }; list.append(d);
   });
-  ccRow(k).append(list); ccSuggest = { k, items, sel: -1 };
+  ccRow(k).append(list); ccSuggest = { k, items, sel: -1, at };
 }
-function ccPick(k, i) { const it = ccSuggest.items[i]; if (!it) return; ccState[k].push(it.value); ccRow(k).querySelector('input').value = ''; ccCloseSuggest(); ccRender(); ccRow(k).querySelector('input').focus(); }
+function ccPick(k, i) {   // picked from the list by him: confirmed
+  const it = ccSuggest.items[i]; if (!it) return;
+  const r = { v: it.value, name: it.name, heard: ccSuggest.at >= 0 ? ccState[k][ccSuggest.at].heard : '', alts: [], ok: true };
+  if (ccSuggest.at >= 0) ccState[k].splice(ccSuggest.at, 1, r); else ccState[k].push(r);
+  ccRow(k).querySelector('input').value = ''; ccCloseSuggest(); ccRender(); ccRow(k).querySelector('input').focus();
+}
 function ccDraft() {
   for (const k of ['to', 'cc', 'bcc']) { const input = ccRow(k).querySelector('input'); if (input.value.trim()) ccCommit(k); }
-  return { kind: 'email', to: ccState.to.slice(), cc: ccState.cc.slice(), bcc: ccState.bcc.slice(), subject: ccSubject.value, body: ccBody.value, files: ccState.files.slice() };
+  const vals = k => ccState[k].map(r => r.v || r.heard), all = [...ccState.to, ...ccState.cc, ...ccState.bcc];
+  return { kind: ccKind, to: vals('to'), cc: vals('cc'), bcc: vals('bcc'), subject: ccSubject.value, body: ccBody.value, files: ccState.files.slice(),
+           confirmed: all.filter(r => r.ok && r.v).map(r => ({ name: r.name, heard: r.heard, v: r.v })), unconfirmed: all.filter(r => !r.ok).map(r => r.name || r.heard || r.v) };
 }
 function ccSend(e) {
   if (!e || !e.isTrusted || !cc.classList.contains('on') || ccSending) return;   // only his own click or key, never a script
@@ -563,7 +597,7 @@ for (const k of ['to', 'cc', 'bcc']) {
     const n = ccSuggest.k === k ? ccSuggest.items.length : 0;
     if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && n) { e.preventDefault(); ccSuggest.sel = (ccSuggest.sel + (e.key === 'ArrowDown' ? 1 : n) + 1) % (n + 1) - 1; document.querySelectorAll('#ccList .tcItem').forEach((d, i) => d.classList.toggle('sel', i === ccSuggest.sel)); }
     else if ((e.key === 'Enter' && !e.metaKey || e.key === 'Tab' && input.value.trim()) && (n || input.value.trim())) { e.preventDefault(); if (n && (ccSuggest.sel >= 0 || e.key === 'Tab')) ccPick(k, Math.max(0, ccSuggest.sel)); else ccCommit(k); }
-    else if (e.key === 'Backspace' && !input.value && ccState[k].length) { ccState[k].pop(); ccRender(); }
+    else if (e.key === 'Backspace' && !input.value && ccState[k].length && !ccSuggest.items.length) { ccState[k].pop(); ccRender(); }
   });
 }
 cc.querySelectorAll('.ccPeople').forEach(b => b.addEventListener('mousedown', e => { if (e.target === b) { e.preventDefault(); b.querySelector('input').focus(); } }));
@@ -582,8 +616,12 @@ Object.assign(window.jarvis, {
     o = o || {}; if (Array.isArray(o.people)) ccPeopleList = o.people;
     const d = o.draft; ccSending = false; ccMsg.classList.remove('err'); ccMsg.textContent = '';
     if (d) {   // a fresh or AI-updated draft; null keeps what is on the card (he may have typed)
-      for (const k of ['to', 'cc', 'bcc']) { ccState[k] = (d[k] || []).map(String).map(ccResolve); ccRow(k).querySelector('input').value = ''; }
-      ccRow('cc').hidden = !ccState.cc.length; ccRow('bcc').hidden = !ccState.bcc.length;
+      ccKind = ['sms', 'whatsapp'].includes(d.kind) ? d.kind : 'email';
+      document.getElementById('ccTitle').textContent = ccKind === 'whatsapp' ? 'WHATSAPP' : ccKind !== 'email' ? 'MESSAGE' : 'EMAIL';
+      document.getElementById('ccVia').textContent = ccKind === 'whatsapp' ? 'via WhatsApp' : ccKind !== 'email' ? 'via Messages · iMessage or SMS' : 'via Apple Mail · Gmail';
+      ccRow('subject').hidden = ccKind !== 'email'; document.getElementById('ccMore').hidden = ccKind !== 'email';
+      for (const k of ['to', 'cc', 'bcc']) { ccState[k] = (d[k] || []).map(v => ccResolve(v)); ccState[k].forEach(r => r.ok = false); ccRow(k).querySelector('input').value = ''; }   // what JARVIS heard is never pre-confirmed
+      ccRow('cc').hidden = ccKind !== 'email' || !ccState.cc.length; ccRow('bcc').hidden = ccKind !== 'email' || !ccState.bcc.length;
       ccSubject.value = d.subject || ''; ccBody.value = d.body || ''; ccState.files = Array.isArray(d.files) ? d.files.slice() : [];
     }
     ccCloseSuggest(); ccRender(); ccPlace(); cc.classList.add('on');
@@ -591,6 +629,10 @@ Object.assign(window.jarvis, {
   },
   composeClose() { cc.classList.remove('on'); ccSending = false; ccCloseSuggest(); document.activeElement && document.activeElement.blur(); },
   composeNow() { return JSON.stringify(ccDraft()); },
+  composeConfirm() {   // his spoken yes: every person on the card that is a real contact or address
+    let n = 0; for (const k of ['to', 'cc', 'bcc']) for (const r of ccState[k]) if (isAddr(r.v) && !r.ok) { r.ok = true; n++; }
+    ccRender(); return n;
+  },
   composeFiles(files) { for (const f of files || []) if (!ccState.files.some(x => x.path === f.path)) ccState.files.push(f); ccRender(); },
   composeError(msg) { ccSending = false; ccMsg.classList.add('err'); ccMsg.textContent = String(msg || 'Not sent').slice(0, 160); ccSendB.disabled = false; },
   composeDrop(on) { cc.classList.toggle('drop', !!on); },

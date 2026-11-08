@@ -580,9 +580,11 @@ class JarvisResponsivenessTests(unittest.TestCase):
         self.assertEqual((draft['to'], draft['cc'], draft['bcc'], draft['subject']), (['Ahmed', 'a@b.co'], ['c@d.co'], [], 'Hi'))
         self.assertEqual(draft['files'], [{'path': f, 'name': 'report.pdf', 'size': 2048}])
         self.assertEqual(problems, [f'No such file: {os.path.join(d, "gone.pdf")}'])
-        self.assertIn('Only email', ' '.join(atticus.compose_draft({'kind': 'sms'})[1]))
+        self.assertIn('Only email, sms and whatsapp', ' '.join(atticus.compose_draft({'kind': 'fax'})[1]))
+        sms, problems = atticus.compose_draft({'kind': 'sms', 'to': ['Ahmed'], 'cc': ['x@y.co'], 'subject': 'S', 'body': 'Running late'})
+        self.assertEqual((sms['kind'], sms['to'], sms['cc'], sms['subject'], sms['body'], problems), ('sms', ['Ahmed'], [], '', 'Running late', []))
         with patch.dict(os.environ, {'ATTICUS_ASK': d}):
-            for answer, said in (('sent', 'Sent from his Gmail'), ('cancel', 'nothing was sent'), (None, '--compose --wait'), ('say: add Sara to cc', 'add Sara to cc')):
+            for answer, said in (('sent', 'Sent, by his own click'), ('cancel', 'nothing was sent'), (None, '--compose --wait'), ('say: add Sara to cc', 'add Sara to cc')):
                 with patch.object(atticus, 'ask_user', return_value=answer), patch.object(atticus, 'type_people', return_value=[]):
                     self.assertIn(said, atticus.compose_tool(['{"to":["a@b.co"]}']))
             self.assertIn('Not valid JSON', atticus.compose_tool(['{nope']))
@@ -592,10 +594,57 @@ class JarvisResponsivenessTests(unittest.TestCase):
         app = self.source(); page = open(os.path.join(os.path.dirname(__file__), '..', 'ui', 'jarvis.html')).read()
         self.assertIn("if (!e || !e.isTrusted || !cc.classList.contains('on') || ccSending) return;", page)   # a script's click never sends
         self.assertIn('case "send":\n            guard let draft else', app)
-        self.assertEqual(app.count('JarvisMail.send('), 1)   # the card's Send is the only way in
+        self.assertEqual(app.count('JarvisMail.send'), 1)   # the card's Send is the only way in
         self.assertIn('if senderAddr is "" and e ends with "@gmail.com" then set senderAddr to e', app)
         self.assertIn('retryOffer = true; askNeed = [:]; askFile = a', app)   # his words answer the card, like the choices card
         self.assertIn('if face.composing { face.composeClose(); answerCompose("cancel"); return }', app)
+
+    def test_text_card_goes_through_messages_on_his_click(self):
+        app = self.source(); page = open(os.path.join(os.path.dirname(__file__), '..', 'ui', 'jarvis.html')).read()
+        self.assertIn('(kind == "whatsapp" ? JarvisWhatsApp.send : kind == "sms" ? JarvisMessages.send : JarvisMail.send)(draft)', app)   # still only from the card's Send
+        self.assertEqual(app.count('JarvisWhatsApp.send'), 1)
+        self.assertIn('?.postToPid(pid) }   // Return, to WhatsApp only', app)
+        self.assertIn('if !clean(text(box)).contains(want) { return nil }', app)   # sent only once the box empties
+        self.assertIn('"kind":"whatsapp"', atticus.JARVIS_TOOLS)
+        self.assertEqual(app.count('JarvisMessages.send'), 1)
+        self.assertIn('if exists chat id ("any;-;" & num) then', app)   # his existing thread first
+        self.assertIn('set target to participant num of smsAcct', app)   # a new number goes as SMS
+        self.assertIn("if (/^01\\d{9}$/.test(n)) n = '+20' + n.slice(1)", page)
+        self.assertIn('"kind":"sms"', atticus.JARVIS_TOOLS)
+
+    def test_names_are_matched_by_sound_and_every_person_is_confirmed(self):
+        import tempfile
+        self.assertEqual(atticus.name_key('Summer'), atticus.name_key('Sama'))   # "Sama" came back "Summer" (09/11)
+        self.assertEqual(atticus.name_key('Mohammed'), atticus.name_key('Mohamed'))
+        self.assertEqual(atticus.name_key('Khashana'), atticus.name_key('Kashana'))
+        self.assertNotEqual(atticus.name_key('Hazem'), atticus.name_key('Summer'))
+        people = [{'name': 'Sama 💙', 'emails': [], 'phones': ['0101 111 2222']}, {'name': 'Sama Rostom', 'emails': [], 'phones': ['01033334444']},
+                  {'name': 'Sama UAE', 'emails': [], 'phones': ['+971 50 123 4567']}, {'name': 'Hazem', 'emails': [], 'phones': ['01055556666']},
+                  {'name': 'Omar State', 'emails': ['o@s.co'], 'phones': ['01077778888']}, {'name': 'Omar State', 'emails': ['o@s.co'], 'phones': ['01077778888']}]
+        d = tempfile.mkdtemp(); talk, sent, names, now = (os.path.join(d, f) for f in ('t.json', 's.json', 'n.json', 'c.json'))
+        with patch.object(atticus, 'PEOPLE_TALK', talk), patch.object(atticus, 'PEOPLE_SENT', sent), patch.object(atticus, 'NAMES', names), \
+             patch.object(atticus, 'COMPOSE_NOW', now), patch.object(atticus, 'DIR', d):
+            r = atticus.resolve_person('Summer', 'whatsapp', people)
+            self.assertEqual((r['v'], r['ok']), ('', False)); self.assertEqual({a['name'] for a in r['alts']}, {'Sama 💙', 'Sama Rostom', 'Sama UAE'})   # no history: he picks
+            json.dump({'talk': {'Sama 💙': 0.9}}, open(talk, 'w'))
+            r = atticus.resolve_person('Summer', 'whatsapp', people)
+            self.assertEqual((r['name'], r['v'], r['heard'], r['ok']), ('Sama 💙', '+201011112222', 'Summer', False))   # the one he talks to, still unconfirmed
+            self.assertEqual(atticus.resolve_person('Omar', 'email', people)['name'], 'Omar State')   # the same card saved twice is one person
+            self.assertEqual(atticus.resolve_person('Zorblax', 'sms', people)['alts'], [])
+            draft = atticus.compose_people({'kind': 'whatsapp', 'to': ['Summer'], 'cc': [], 'bcc': []}, people)
+            self.assertEqual(draft['ask'], 'To Sama, sir?')
+            self.assertIn("can't find Zorblax", atticus.compose_people({'kind': 'sms', 'to': ['Zorblax'], 'cc': [], 'bcc': []}, people)['ask'])
+            json.dump({'confirmed': [{'name': 'Sama Rostom', 'heard': 'Summer', 'v': '+201033334444'}]}, open(now, 'w'))
+            atticus.compose_learn()
+            self.assertEqual(json.load(open(names)), {'summer': 'Sama Rostom'}); self.assertEqual(json.load(open(sent)), {'Sama Rostom': 1})
+            self.assertEqual(atticus.resolve_person('Summer', 'whatsapp', people)['name'], 'Sama Rostom')   # what he confirmed wins next time
+        app = self.source(); page = open(os.path.join(os.path.dirname(__file__), '..', 'ui', 'jarvis.html')).read()
+        self.assertIn("ccSendB.disabled = ccSending || !all.length || bad.length > 0 || unsure.length > 0 || big;", page)   # Send waits for every person
+        self.assertIn("ccState[k].forEach(r => r.ok = false);", page)   # nothing JARVIS heard is pre-confirmed
+        self.assertIn('if Self.jarvisYesNo(heard) == true { face.run("jarvis.composeConfirm()"); return jarvisCardListen() }', app)
+        self.assertIn('jarvisSpeakLive(ask, track: false); jarvisEndLive() }   // "To Sama, sir?"', app)
+        self.assertIn('config + "/people-talk.json"', app)
+        self.assertIn('never decide who someone is yourself', atticus.JARVIS_TOOLS)
 
     def test_reply_after_a_spoken_tool_line_is_not_said_twice(self):
         app = self.source(); body = app[app.index('    func deliver('):app.index('    func linger(')]
@@ -743,7 +792,7 @@ class JarvisResponsivenessTests(unittest.TestCase):
             run.assert_not_called()
         with patch.object(atticus, 'contacts', return_value='Contacts unavailable. Use the app address book or ask for the recipient.'):
             self.assertEqual(atticus.whatsapp_tool(['Karim', 'hi']), 'Contacts are not reachable right now.')
-        self.assertIn('Never claim it was sent', atticus.JARVIS_TOOLS)
+        self.assertIn('He presses Send on the card and it goes through WhatsApp', atticus.JARVIS_TOOLS)
         self.assertIn(f"{atticus.shlex.quote(atticus.ME)} --whatsapp ", atticus.QUIET)
 
 

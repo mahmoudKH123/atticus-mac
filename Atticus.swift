@@ -930,6 +930,195 @@ enum JarvisMail {
         }
     }
 }
+// JARVIS compose card, texts: through Messages to each number. An existing chat keeps its own thread (iMessage or SMS);
+// a new number goes as SMS through his iPhone. Only the card's Send (his click or ⌘↵) reaches this, like JarvisMail.
+enum JarvisMessages {
+    static let script = """
+    on run argv
+        set {numList, theText, fileList} to argv
+        tell application "Messages"
+            set smsAcct to missing value
+            repeat with a in (get every account)
+                try
+                    if service type of a is SMS and enabled of a then set smsAcct to a
+                end try
+            end repeat
+            repeat with p in paragraphs of numList
+                set num to p as text
+                if num is not "" then
+                    if exists chat id ("any;-;" & num) then
+                        set target to chat id ("any;-;" & num)
+                    else
+                        if smsAcct is missing value then error "No SMS on this Mac" number 9001
+                        set target to participant num of smsAcct
+                    end if
+                    if theText is not "" then send theText to target
+                    repeat with f in paragraphs of fileList
+                        if (f as text) is not "" then send ((POSIX file (f as text)) as alias) to target
+                    end repeat
+                end if
+            end repeat
+        end tell
+        return "sent"
+    end run
+    """
+    static func send(_ d: [String: Any], done: @escaping (String?) -> Void) {
+        let numbers = (d["to"] as? [String] ?? []).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        let files = (d["files"] as? [[String: Any]] ?? []).compactMap { $0["path"] as? String }, body = d["body"] as? String ?? ""
+        guard !numbers.isEmpty, numbers.allSatisfy({ $0.range(of: #"^\+\d{8,15}$"#, options: .regularExpression) != nil }) else { return done("Check the numbers") }
+        guard !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !files.isEmpty else { return done("Nothing to send") }
+        if let missing = files.first(where: { !FileManager.default.isReadableFile(atPath: $0) }) { return done("Can't read " + (missing as NSString).lastPathComponent) }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let p = Process(), out = Pipe(), err = Pipe()
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript"); p.arguments = ["-e", script, numbers.joined(separator: "\n"), body, files.joined(separator: "\n")]
+            p.standardOutput = out; p.standardError = err
+            var result: String? = "Messages didn't answer"
+            do {
+                try p.run()
+                let killer = DispatchWorkItem { if p.isRunning { p.terminate() } }; DispatchQueue.global().asyncAfter(deadline: .now() + 60, execute: killer)
+                p.waitUntilExit(); killer.cancel()
+                let said = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+                let why = String(decoding: err.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+                if said == "sent" { result = nil }
+                else {
+                    NSLog("JARVIS messages: not sent (%@)", String(why.replacingOccurrences(of: #"\+?\d{6,}"#, with: "<num>", options: .regularExpression).prefix(200)))   // no numbers or words
+                    result = why.contains("-1743") || why.contains("Not authorized") ? "Allow Atticus to control Messages in System Settings › Privacy › Automation"
+                        : why.contains("9001") ? "Turn on Text Message Forwarding for this Mac on your iPhone" : "Messages couldn't send it"
+                }
+            } catch { result = "Couldn't start Messages" }
+            DispatchQueue.main.async { done(result) }
+        }
+    }
+}
+// JARVIS compose card, WhatsApp: WhatsApp has no scripting, so for each number: open its own link with the text typed, wait until
+// that text is in the "Compose message" box, press Return in WhatsApp only (posted to its process), and count it sent only when
+// the box empties. "isn't on WhatsApp" is reported, never guessed. Only the card's Send (his click or ⌘↵) reaches this.
+enum JarvisWhatsApp {
+    static let bundle = "net.whatsapp.WhatsApp"
+    static func attr(_ e: AXUIElement, _ k: String) -> CFTypeRef? { var v: CFTypeRef?; AXUIElementCopyAttributeValue(e, k as CFString, &v); return v }
+    static func find(_ e: AXUIElement, depth: Int = 0, budget: inout Int, _ match: (AXUIElement, String) -> Bool) -> AXUIElement? {
+        budget -= 1; guard budget > 0, depth < 40 else { return nil }
+        if match(e, attr(e, kAXRoleAttribute) as? String ?? "") { return e }
+        for c in attr(e, kAXChildrenAttribute) as? [AXUIElement] ?? [] { if let hit = find(c, depth: depth + 1, budget: &budget, match) { return hit } }
+        return nil
+    }
+    static func text(_ e: AXUIElement) -> String { (attr(e, kAXValueAttribute) as? String ?? "") + (attr(e, kAXTitleAttribute) as? String ?? "") }
+    static func clean(_ s: String) -> String { s.unicodeScalars.filter { !CharacterSet.whitespacesAndNewlines.contains($0) && !(0x200B...0x200F).contains($0.value) && $0.value != 0xFEFF }.map(String.init).joined() }
+    static func one(_ number: String, _ body: String) -> String? {
+        var c = URLComponents(string: "whatsapp://send")!; c.queryItems = [.init(name: "phone", value: number), .init(name: "text", value: body)]
+        guard let url = c.url, NSWorkspace.shared.open(url) else { return "WhatsApp didn't open" }
+        let want = String(clean(body).prefix(40)), deadline = Date().addingTimeInterval(15)
+        var box: AXUIElement?, pid: pid_t = 0
+        while Date() < deadline, box == nil {
+            Thread.sleep(forTimeInterval: 0.3)
+            guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundle).first else { continue }
+            pid = app.processIdentifier; let root = AXUIElementCreateApplication(pid)
+            for w in attr(root, kAXWindowsAttribute) as? [AXUIElement] ?? [] {
+                var budget = 3000
+                if let alert = find(w, budget: &budget, { e, role in role == "AXStaticText" && text(e).contains("isn't on WhatsApp") }) {
+                    _ = alert; var b2 = 3000
+                    if let ok = find(w, budget: &b2, { e, role in role == "AXButton" && clean(text(e)) == "OK" }) { AXUIElementPerformAction(ok, kAXPressAction as CFString) }
+                    return "That number isn't on WhatsApp"
+                }
+                budget = 3000
+                box = find(w, budget: &budget) { e, role in role == "AXTextArea" && !want.isEmpty && clean(text(e)).contains(want) }
+                if box != nil { break }
+            }
+        }
+        guard let box, pid != 0 else { return "WhatsApp didn't show the message" }
+        NSRunningApplication(processIdentifier: pid)?.activate()
+        AXUIElementSetAttributeValue(box, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+        Thread.sleep(forTimeInterval: 0.25)
+        let src = CGEventSource(stateID: .hidSystemState)
+        for down in [true, false] { CGEvent(keyboardEventSource: src, virtualKey: 36, keyDown: down)?.postToPid(pid) }   // Return, to WhatsApp only
+        let sentBy = Date().addingTimeInterval(4)
+        while Date() < sentBy {
+            Thread.sleep(forTimeInterval: 0.2)
+            if !clean(text(box)).contains(want) { return nil }   // the box emptied: WhatsApp took it
+        }
+        return "Not sent: press Enter in WhatsApp"
+    }
+    static func send(_ d: [String: Any], done: @escaping (String?) -> Void) {
+        let numbers = (d["to"] as? [String] ?? []).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        let body = (d["body"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !numbers.isEmpty, numbers.allSatisfy({ $0.range(of: #"^\+\d{8,15}$"#, options: .regularExpression) != nil }) else { return done("Check the numbers") }
+        guard !body.isEmpty else { return done("Write the message first; files go on your clipboard after it") }
+        guard AXIsProcessTrusted() else { return done("Atticus needs Accessibility to press Enter in WhatsApp") }
+        DispatchQueue.global(qos: .userInitiated).async {
+            var error: String?
+            for n in numbers { if let e = one(String(n.dropFirst()), body) { error = numbers.count > 1 ? e + " (" + String(n.suffix(4)) + ")" : e; break } }
+            if error != nil { NSLog("JARVIS whatsapp: not sent (%@)", error!.replacingOccurrences(of: #"\d{4}"#, with: "<n>", options: .regularExpression)) }
+            DispatchQueue.main.async { done(error) }
+        }
+    }
+}
+// JARVIS mode: who he actually talks to, for picking the right "Sama" and as speech hints. Read every 30 min from the chats he has
+// open: WhatsApp's chat list (only when WhatsApp is already running) and Messages' recent one-to-one chats. Names only, newest first.
+enum JarvisPeople {
+    static var at = Date.distantPast
+    static func tick() {
+        guard Prefs.bool("jarvis"), Date().timeIntervalSince(at) > 1800 else { return }
+        at = Date()
+        DispatchQueue.global(qos: .utility).async {
+            var talk: [String: Double] = [:]
+            for (i, n) in whatsApp().enumerated() { talk[n] = max(talk[n] ?? 0, max(0.2, 1 - Double(i) * 0.03)) }
+            for (i, n) in messages().enumerated() { talk[n] = max(talk[n] ?? 0, max(0.15, 0.8 - Double(i) * 0.02)) }
+            guard !talk.isEmpty, let data = try? JSONSerialization.data(withJSONObject: ["talk": talk, "at": ISO8601DateFormatter().string(from: Date())], options: .prettyPrinted) else { return }
+            try? data.write(to: URL(fileURLWithPath: (Prefs.path as NSString).deletingLastPathComponent + "/people-talk.json"), options: .atomic)
+        }
+    }
+    static func chatName(_ title: String) -> String? {   // "1:Engage Egypt, ‎2 unread messages" -> "Engage Egypt"; a message row or a bare number -> nil
+        var t = title.unicodeScalars.filter { !(0x200B...0x200F).contains($0.value) && !(0x202A...0x202E).contains($0.value) }.map(String.init).joined()
+        t = t.replacingOccurrences(of: #"^\d+:"#, with: "", options: .regularExpression)
+        if let r = t.range(of: #",\s*(\d+ unread|muted|pinned|typing).*$"#, options: [.regularExpression, .caseInsensitive]) { t.removeSubrange(r) }
+        t = t.trimmingCharacters(in: .whitespacesAndNewlines)
+        let skip = ["message", "reacted", "album", "archived", "photo", "video", "voice", "sticker", "meta ai", "chats", "status", "calls"]
+        let buttons: Set<String> = ["you", "edit", "more", "new chat", "share media", "emoji picker", "search", "settings", "filter", "attach", "send", "voice message",
+                                    "back", "close", "info", "communities", "channels", "unread", "favourites", "favorites", "groups", "all", "camera", "stickers", "gif"]
+        guard t.count >= 2, t.count <= 60, t.rangeOfCharacter(from: .letters) != nil, !buttons.contains(t.lowercased()), !skip.contains(where: { t.lowercased().hasPrefix($0) }) else { return nil }
+        return t
+    }
+    static func whatsApp() -> [String] {
+        guard AXIsProcessTrusted(), let app = NSRunningApplication.runningApplications(withBundleIdentifier: JarvisWhatsApp.bundle).first else { return [] }
+        var out: [String] = [], budget = 4000
+        func walk(_ e: AXUIElement, _ d: Int) {
+            budget -= 1; guard budget > 0, d < 30, out.count < 30 else { return }
+            let label = (JarvisWhatsApp.attr(e, kAXTitleAttribute) as? String).flatMap { $0.isEmpty ? nil : $0 } ?? JarvisWhatsApp.attr(e, kAXDescriptionAttribute) as? String ?? ""
+            if JarvisWhatsApp.attr(e, kAXRoleAttribute) as? String == "AXButton", let n = chatName(label), !out.contains(n) { out.append(n) }
+            for c in JarvisWhatsApp.attr(e, kAXChildrenAttribute) as? [AXUIElement] ?? [] { walk(c, d + 1) }
+        }
+        for w in JarvisWhatsApp.attr(AXUIElementCreateApplication(app.processIdentifier), kAXWindowsAttribute) as? [AXUIElement] ?? [] { walk(w, 0) }
+        return out
+    }
+    static func messages() -> [String] {
+        guard NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.MobileSMS").first != nil else { return [] }
+        let script = """
+        tell application "Messages"
+            set out to {}
+            repeat with i from 1 to (count of chats)
+                if i > 40 then exit repeat
+                try
+                    set c to chat i
+                    if (count of participants of c) is 1 then
+                        set p to participant 1 of c
+                        set h to handle of p
+                        set n to name of p
+                        if (h starts with "+" or h contains "@") and n is not h then set end of out to n
+                    end if
+                end try
+            end repeat
+            set AppleScript's text item delimiters to linefeed
+            return out as text
+        end tell
+        """
+        let p = Process(), out = Pipe(); p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript"); p.arguments = ["-e", script]; p.standardOutput = out; p.standardError = Pipe()
+        guard (try? p.run()) != nil else { return [] }
+        let killer = DispatchWorkItem { if p.isRunning { p.terminate() } }; DispatchQueue.global().asyncAfter(deadline: .now() + 20, execute: killer)
+        let text = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self); p.waitUntilExit(); killer.cancel()
+        var seen = Set<String>()
+        return text.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { $0.rangeOfCharacter(from: .letters) != nil && !$0.hasPrefix("+") && seen.insert($0).inserted }
+    }
+}
 func jarvisWarm() {
     guard let me = Bundle.main.executableURL else { return }
     let p = Process(); p.executableURL = me; p.arguments = ["--jarvis-warm"]; try? p.run()
@@ -2608,6 +2797,7 @@ final class App: NSObject, WKScriptMessageHandler {
     func finishOrSignOff() {   // JARVIS mode: a sign-off ends the hands-free chat instead of being sent
         if jarvisCompose, let old = offerText {   // words while the compose card is open: a voice edit, kept with what he typed on it
             let heard = text; text = old; offerText = nil
+            if Self.jarvisYesNo(heard) == true { face.run("jarvis.composeConfirm()"); return jarvisCardListen() }   // "yes": the people on the card are right
             if Self.endsJarvisChat(heard) || heard.trimmingCharacters(in: .whitespacesAndNewlines).count < 2 { return jarvisCardListen() }   // keyboard noise comes back as "Thank you."
             let file = composeFile; composeFile = ""
             face.composeNow { [weak self] now in
@@ -2893,6 +3083,9 @@ final class App: NSObject, WKScriptMessageHandler {
         if Prefs.bool("jarvis") {   // the words he corrected JARVIS on go first (newest first), then the fixed list
             let heard = (try? JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: config + "/heard.json")))) as? [String: [String: Any]] ?? [:]
             all.append(contentsOf: heard.values.sorted { ($0["at"] as? String ?? "") > ($1["at"] as? String ?? "") }.compactMap { $0["meant"] as? String }.prefix(12))
+            // the people he talks to most (people-talk.json, from his WhatsApp and Messages chats): first names only, so "Sama" is not "Summer"
+            let talk = ((try? JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: config + "/people-talk.json")))) as? [String: Any])?["talk"] as? [String: Double] ?? [:]
+            all.append(contentsOf: talk.sorted { $0.value > $1.value }.compactMap { $0.key.split(separator: " ").first.map { String($0.unicodeScalars.filter { CharacterSet.letters.contains($0) }) } }.filter { $0.count > 1 }.prefix(25))
             all.append(contentsOf: Self.jarvisWords)
         }
         all.append(profileName(config + "/me.json"))
@@ -2952,6 +3145,7 @@ final class App: NSObject, WKScriptMessageHandler {
         var show: [String: Any] = ["people": j["people"] ?? []]; if !(j["draft"] is NSNull) { show["draft"] = j["draft"] }
         if !(j["draft"] is NSNull) || !face.composing, let data = try? JSONSerialization.data(withJSONObject: show) { face.compose(String(decoding: data, as: UTF8.self)) }
         retryOffer = true; askNeed = [:]; askFile = a   // the card-reply path, as the choices card: his next words answer the card
+        if let d = j["draft"] as? [String: Any], let ask = d["ask"] as? String, !ask.isEmpty, Prefs.bool("speak") { jarvisSpeakLive(ask, track: false); jarvisEndLive() }   // "To Sama, sir?"
         jarvisCardListen()
     }
     func composeEvent(_ what: String, _ draft: [String: Any]?) {
@@ -2963,10 +3157,16 @@ final class App: NSObject, WKScriptMessageHandler {
             op.begin { [weak self] r in if r == .OK { self?.face.composeFiles(op.urls) } }
         case "send":
             guard let draft else { return face.composeError("Nothing to send") }
-            JarvisMail.send(draft) { [weak self] error in
+            let kind = draft["kind"] as? String ?? "email"
+            (kind == "whatsapp" ? JarvisWhatsApp.send : kind == "sms" ? JarvisMessages.send : JarvisMail.send)(draft) { [weak self] error in
                 guard let self else { return }
                 if let error { return self.face.composeError(error) }
-                self.composeSentAt = Date(); self.face.composeClose(); self.cue("soundDone"); self.answerCompose("sent")
+                let files = kind == "whatsapp" ? (draft["files"] as? [[String: Any]] ?? []).compactMap { $0["path"] as? String } : []
+                if !files.isEmpty { NSPasteboard.general.clearContents(); NSPasteboard.general.writeObjects(files.map { URL(fileURLWithPath: $0) as NSURL }) }   // he pastes them in the chat
+                if let data = try? JSONSerialization.data(withJSONObject: draft) {   // who he confirmed, for atticus.py to learn names from
+                    try? data.write(to: URL(fileURLWithPath: (Prefs.path as NSString).deletingLastPathComponent + "/compose-now.json"), options: .atomic)
+                }
+                self.composeSentAt = Date(); self.face.composeClose(); self.cue("soundDone"); self.answerCompose(files.isEmpty ? "sent" : "sent-files")
             }
         default: break
         }
@@ -4122,7 +4322,7 @@ final class App: NSObject, WKScriptMessageHandler {
         whisperListen = whisper; whisperBusy = false; whisperReleasing = false; whisperAsk += 1; whisperQueued = 0; whisperVoice = .distantPast; whisperAudio.reset()
         if whisper {
             feed = nil; speechInputID = nil; analyzer = nil; reading = nil
-            Whisper.shared.warm(); whisperPrompt = String(hints.joined(separator: ", ").prefix(600))   // hints read app folders: once per listen, not per pass
+            Whisper.shared.warm(); whisperPrompt = String(hints.joined(separator: ", ").prefix(Prefs.bool("jarvis") ? 760 : 600))   // hints read app folders: once per listen, not per pass
             beginWhisperSegment("")
         } else {
             let first = beginSpeechSegment("", listeningID: listeningID)
@@ -9662,7 +9862,7 @@ let app = App()
 Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in app.wakeTick() }
 Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in app.jarvisTimersTick() }   // JARVIS timers and alarms; returns at once when off
 Whisper.shared.isEcho = { jarvisSaid.echo($0) }
-Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { _ in app.jarvisOrdersTick() }   // JARVIS order news; returns at once when off or not due
+Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { _ in app.jarvisOrdersTick(); JarvisPeople.tick() }   // JARVIS order news; returns at once when off or not due
 Timer.scheduledTimer(withTimeInterval: 1.0 / 30, repeats: true) { _ in app.jarvisTick() }   // JARVIS mode's face; returns at once when off
 let agentsUI = AgentPanels()
 let routineWake = RoutineWake()

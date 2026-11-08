@@ -5406,7 +5406,7 @@ def agents_service():
     finally: manager.close()
 
 
-JARVIS_TOOLS = f"\nReminders (any language): {shlex.quote(ME)} --reminders --help for JSON list/add/edit/complete/delete; always use it, never AppleScript.\nMac controls: {shlex.quote(ME)} --mac --help (volume, mute, brightness, dark mode, Wi-Fi, Bluetooth, airplane mode, Do Not Disturb, screenshot, lock, screen off, status); use it for these.\nTimers and alarms: {shlex.quote(ME)} --timer --help; use it, never sleep or AppleScript.\nOther Mac settings: open x-apple.systempreferences:<page id>, then {HANDS}; every change there asks him first. Security and privacy pages, sudo and security commands are blocked: open the page and let him change it.\nEmail (his personal Gmail): {shlex.quote(ME)} --mail '<what he wants, in plain words>'; it reads, searches, summarises and saves drafts, never sends. Do email yourself, here, never as a background agent. To write one: {shlex.quote(ME)} --compose '{{\"to\":[\"<address or contact name>\"],\"cc\":[],\"bcc\":[],\"subject\":\"...\",\"body\":\"...\",\"files\":[\"<full path>\"]}}' after one short line ('Here it is, sir.'). Write the subject and body yourself from what he said, in his voice; find files with mdfind or ls first. It shows every field on a card; he edits it by typing or voice and presses Send himself (only his click sends; you never can). Unknown address: put the contact name, the card suggests his contacts. When --compose says Sent, it really went out from his Gmail by his own click: say so plainly and never doubt it later. Use --mail only when he asks for a draft.\nOrders and deliveries (any shop): {shlex.quote(ME)} --orders gives his current orders from Gmail; answer from it in a sentence or two.\nLanguage: he may speak Egyptian Arabic or mix it with English, in Arabic script or transliterated (\"eftah Spotify\", \"fakkarni bokra\"); understand it and always answer in English. Speech recognition may write English words in Arabic letters (\"سبوتيفاي\" = Spotify).\nWhatsApp: {shlex.quote(ME)} --whatsapp '<name>' '<message>' (people in his contacts only). Tidy what he said into a short, casual message in his own voice and in the language he used (\"tell Ahmed I'm running late\" -> \"Running a bit late, sorry!\"). It opens the chat with the text typed; he presses send. Never claim it was sent; say it's ready for him to send.\nTyping: when you need something exact (an email address, phone number, URL, spelling of a name, a code or reference) and he hasn't spelled it clearly, or he says 'let me type it', run {shlex.quote(ME)} --typein '<short label, e.g. Email address>' [email|phone|url|text] after one short spoken line ('Type the address, sir.'); it waits while he types (his contacts are suggested) and prints exactly what he typed. Use that text exactly. Never for passwords, PINs or codes sent to him.\nHearing: when he corrects a word you misheard ('no, I said email', 'I meant Westcon'), run {shlex.quote(ME)} --heard '<every wrong word, copied exactly from his earlier ask (\"tracked her\", not \"tracked\")>' '<what he meant>', then do what he meant. Only for real mishearings, never for a change of mind. 'What have you learned' about hearing: --heard --list; 'forget that': --heard --forget '<words>'.\nShopping: one step, no browsing: {shlex.quote(ME)} --shop '<short search phrase>' [shops] [--cheapest when he wants the cheapest]. Shops: the one he names, else the right ones for the item (default amazon noon jumia; add 2b for electronics, ikea for furniture and home, carrefour for groceries; aliexpress or temu only if he says cheap or from abroad). Then a few words ('Amazon, Noon and Jumia are up, sir.') and stop: he takes it from there. Never read options, add to cart or check out unless he asks; never type card numbers or passwords; the final buy button is always his."
+JARVIS_TOOLS = f"\nReminders (any language): {shlex.quote(ME)} --reminders --help for JSON list/add/edit/complete/delete; always use it, never AppleScript.\nMac controls: {shlex.quote(ME)} --mac --help (volume, mute, brightness, dark mode, Wi-Fi, Bluetooth, airplane mode, Do Not Disturb, screenshot, lock, screen off, status); use it for these.\nTimers and alarms: {shlex.quote(ME)} --timer --help; use it, never sleep or AppleScript.\nOther Mac settings: open x-apple.systempreferences:<page id>, then {HANDS}; every change there asks him first. Security and privacy pages, sudo and security commands are blocked: open the page and let him change it.\nEmail (his personal Gmail): {shlex.quote(ME)} --mail '<what he wants, in plain words>'; it reads, searches, summarises and saves drafts, never sends. Do email yourself, here, never as a background agent. To write one: {shlex.quote(ME)} --compose '{{\"to\":[\"<address or contact name>\"],\"cc\":[],\"bcc\":[],\"subject\":\"...\",\"body\":\"...\",\"files\":[\"<full path>\"]}}' and say nothing before it: the card asks him aloud to confirm who it's to. Pass names exactly as you heard them, never decide who someone is yourself: the card matches his contacts by sound and he confirms every person. Write the subject and body yourself from what he said, in his voice; find files with mdfind or ls first. It shows every field on a card; he edits it by typing or voice and presses Send himself (only his click sends; you never can). Unknown address: put the contact name, the card suggests his contacts. Texts (SMS or iMessage): the same card with \"kind\":\"sms\", \"to\" = phone numbers or contact names, \"body\", optional \"files\" (photos, PDFs); it goes through Messages on his click. When --compose says Sent, it really went out by his own click: say so plainly and never doubt it later. Use --mail only when he asks for a draft.\nOrders and deliveries (any shop): {shlex.quote(ME)} --orders gives his current orders from Gmail; answer from it in a sentence or two.\nLanguage: he may speak Egyptian Arabic or mix it with English, in Arabic script or transliterated (\"eftah Spotify\", \"fakkarni bokra\"); understand it and always answer in English. Speech recognition may write English words in Arabic letters (\"سبوتيفاي\" = Spotify).\nWhatsApp: the same card with \"kind\":\"whatsapp\", \"to\" = contact names or phone numbers, \"body\", optional \"files\". Tidy what he said into a short, casual message in his own voice and in the language he used (\"tell Ahmed I'm running late\" -> \"Running a bit late, sorry!\"). He presses Send on the card and it goes through WhatsApp. 'Message' or 'text' with no app named = sms; 'WhatsApp' named = whatsapp. To only open a chat with text typed: {shlex.quote(ME)} --whatsapp '<name>' '<message>'.\nTyping: when you need something exact (an email address, phone number, URL, spelling of a name, a code or reference) and he hasn't spelled it clearly, or he says 'let me type it', run {shlex.quote(ME)} --typein '<short label, e.g. Email address>' [email|phone|url|text] after one short spoken line ('Type the address, sir.'); it waits while he types (his contacts are suggested) and prints exactly what he typed. Use that text exactly. Never for passwords, PINs or codes sent to him.\nHearing: when he corrects a word you misheard ('no, I said email', 'I meant Westcon'), run {shlex.quote(ME)} --heard '<every wrong word, copied exactly from his earlier ask (\"tracked her\", not \"tracked\")>' '<what he meant>', then do what he meant. Only for real mishearings, never for a change of mind. 'What have you learned' about hearing: --heard --list; 'forget that': --heard --forget '<words>'.\nShopping: one step, no browsing: {shlex.quote(ME)} --shop '<short search phrase>' [shops] [--cheapest when he wants the cheapest]. Shops: the one he names, else the right ones for the item (default amazon noon jumia; add 2b for electronics, ikea for furniture and home, carrefour for groceries; aliexpress or temu only if he says cheap or from abroad). Then a few words ('Amazon, Noon and Jumia are up, sir.') and stop: he takes it from there. Never read options, add to cart or check out unless he asks; never type card numbers or passwords; the final buy button is always his."
 
 JARVIS = """
 JARVIS mode (overrides your name, reply length and tone above): you're Jarvis, his own AI, running his Mac and his day. Talk like a quick-witted British right hand: composed, dry, understated, warm, a bit cheeky. Polished, never stiff or scripted.
@@ -7320,9 +7320,117 @@ def compose_draft(d):
         if not os.path.isfile(path): problems.append(f'No such file: {f}'); continue
         size = os.path.getsize(path); total += size
         out['files'].append({'path': path, 'name': os.path.basename(path), 'size': size})
-    if total > COMPOSE_MB * 1024 * 1024: problems.append(f'Files add up to {total // 1048576} MB; Gmail takes {COMPOSE_MB} MB.')
-    if (d.get('kind') or 'email') != 'email': problems.append('Only email for now.')
+    kind = d.get('kind') or 'email'
+    if kind in ('sms', 'whatsapp'):   # a text (Messages) or a WhatsApp message: phone numbers or contact names, words and files only
+        out.update(kind=kind, cc=[], bcc=[], subject='')
+    elif kind != 'email': problems.append('Only email, sms and whatsapp for now.')
+    elif total > COMPOSE_MB * 1024 * 1024: problems.append(f'Files add up to {total // 1048576} MB; Gmail takes {COMPOSE_MB} MB.')
     return out, problems
+
+# JARVIS mode: who he means. Speech recognition turns names into English words ("Sama" came back "Summer", 09/11), so every recipient
+# is matched against his contacts by how it sounds, people he actually talks to first (the app's people-talk.json from his WhatsApp
+# and Messages chats, plus people-sent.json from what he sent), and names he confirmed before (names.json). He confirms every one.
+NAMES, PEOPLE_TALK, PEOPLE_SENT = (os.path.join(DIR, f) for f in ('names.json', 'people-talk.json', 'people-sent.json'))
+def read_json(path, default):
+    try:
+        with open(path) as f: v = json.load(f)
+        return v if isinstance(v, type(default)) else default
+    except (OSError, ValueError): return default
+
+def write_json(path, value):
+    os.makedirs(DIR, mode=0o700, exist_ok=True)
+    with tempfile.NamedTemporaryFile(mode='w', dir=DIR, delete=False) as f:
+        json.dump(value, f, indent=1, ensure_ascii=False); f.flush(); os.replace(f.name, path)
+
+def name_words(s):
+    return re.findall(r'[a-z]+', (s or '').lower())
+
+def name_key(word):
+    """How a name sounds, roughly: consonants only, alike sounds merged, a final r dropped (British "Summer" ~ "Sama")."""
+    w = word.lower()
+    for a, b in (('ph', 'f'), ('th', 't'), ('kh', 'k'), ('gh', 'g'), ('sh', 's'), ('ch', 's'), ('ck', 'k'), ('q', 'k'), ('c', 'k'), ('z', 's'), ('x', 'ks'), ('j', 'g')):
+        w = w.replace(a, b)
+    if not w: return ''
+    first = 'a' if w[0] in 'aeiouy' else w[0]   # the first sound always counts ("Hazem" is not "Summer")
+    cons = re.sub(r'(.)\1+', r'\1', first + re.sub(r'[aeiouyhw]', '', w[1:]))
+    if len(cons) > 1 and cons.endswith('r'): cons = cons[:-1]
+    return cons
+
+def name_score(heard, contact):
+    """0..1: how well what he said fits a contact's name."""
+    hw, cw = name_words(heard), name_words(contact)
+    if not hw or not cw: return 0.0
+    if hw == cw: return 1.0
+    if hw == cw[:len(hw)] or hw == cw[-len(hw):]: return 0.97   # "Sama" for "Sama Rostom"
+    head = cw[:len(hw)]
+    if [name_key(w) for w in hw] == [name_key(w) for w in head]: return 0.92   # sounds the same
+    import difflib
+    return max(difflib.SequenceMatcher(None, ' '.join(hw), ' '.join(head)).ratio() * 0.88,
+               difflib.SequenceMatcher(None, ' '.join(map(name_key, hw)), ' '.join(map(name_key, head))).ratio() * 0.85)
+
+def contact_values(p, kind):
+    if kind == 'email': return p.get('emails') or []
+    nums = ['+' + n for n in (whatsapp_number(x) for x in p.get('phones') or []) if n]
+    mobiles = [n for n in nums if re.fullmatch(r'\+201[0125]\d{8}', n)]
+    return list(dict.fromkeys(mobiles or nums))
+
+def is_address(v, kind):
+    return bool(re.fullmatch(r'[^\s@<>,;]+@[^\s@<>,;]+\.[^\s@<>,;]+', v)) if kind == 'email' else bool(re.fullmatch(r'\+?[\d\s\-().]{8,20}', v))
+
+def resolve_person(heard, kind, people):
+    """{v, name, heard, alts, ok: False}: the contact he most likely means, never confirmed here."""
+    heard = str(heard).strip()
+    if is_address(heard, kind):
+        v = heard if kind == 'email' else '+' + whatsapp_number(heard) if whatsapp_number(heard) else heard
+        who = next((p['name'] for p in people if v in contact_values(p, kind)), '')
+        return {'v': v, 'name': who, 'heard': '', 'alts': [], 'ok': False}
+    talk, sent, learned = read_json(PEOPLE_TALK, {}).get('talk', {}), read_json(PEOPLE_SENT, {}), read_json(NAMES, {})
+    known = learned.get(' '.join(name_words(heard)))
+    scored, seen = [], set()
+    for p in people:
+        vals = contact_values(p, kind)
+        if not vals or (p['name'], vals[0]) in seen: continue   # the same person saved twice is one person
+        seen.add((p['name'], vals[0]))
+        score = 1.5 if known and p['name'] == known else name_score(heard, p['name'])   # what he confirmed before wins
+        if score >= 0.8:
+            bonus = 0.25 * float(talk.get(p['name'], 0)) + min(0.15, 0.05 * int(sent.get(p['name'], 0)))
+            scored.append((score + bonus, score, p['name'], vals[0]))
+    scored.sort(key=lambda x: -x[0])
+    alts = [{'name': n, 'v': v} for _, _, n, v in scored[:4]]
+    if not scored: return {'v': '', 'name': '', 'heard': heard, 'alts': [], 'ok': False}
+    top = scored[0]
+    close = len(scored) > 1 and scored[1][0] >= top[0] - 0.1
+    changed = name_words(heard) != name_words(top[2])[:len(name_words(heard))]
+    if close: return {'v': '', 'name': '', 'heard': heard, 'alts': alts, 'ok': False}
+    return {'v': top[3], 'name': top[2], 'heard': heard if changed else '', 'alts': alts[1:], 'ok': False}
+
+def spoken_name(n):
+    return ' '.join(re.findall(r"[\w'.-]+", n or '')) or n
+
+def compose_people(draft, people):
+    """Recipients become contacts to confirm, plus the one question the card asks aloud."""
+    kind, unknown, unsure, sure = draft['kind'], [], [], []
+    for k in ('to', 'cc', 'bcc'):
+        draft[k] = [resolve_person(x, kind, people) for x in draft[k]]
+        for r in draft[k]:
+            if r['v']: sure.append(spoken_name(r['name']) or r['v'][-4:])
+            elif r['alts']: unsure.append(r['heard'])
+            else: unknown.append(r['heard'])
+    if unknown: draft['ask'] = f"I can't find {', '.join(unknown)} in your contacts, sir. Who is it?"
+    elif unsure: draft['ask'] = f"Which {unsure[0]}, sir? They're on the card."
+    elif sure: draft['ask'] = f"To {' and '.join(sure[:3])}, sir?"
+    return draft
+
+def compose_learn():
+    """After a send: names he confirmed for words that were heard differently ("summer" -> "Sama 💙"), and who he messages."""
+    now = read_json(COMPOSE_NOW, {})
+    learned, sent = read_json(NAMES, {}), read_json(PEOPLE_SENT, {})
+    for c in now.get('confirmed') or []:
+        name, heard = str(c.get('name') or ''), ' '.join(name_words(c.get('heard')))
+        if not name: continue
+        sent[name] = int(sent.get(name, 0)) + 1
+        if heard and heard != ' '.join(name_words(name)) and not TYPE_SECRET.search(heard): learned[heard] = name
+    write_json(NAMES, dict(list(learned.items())[-300:])); write_json(PEOPLE_SENT, sent)
 
 def compose_tool(args):
     """--compose '<json draft>' shows the card and waits; --compose --wait keeps waiting on the open card."""
@@ -7332,13 +7440,19 @@ def compose_tool(args):
         try: draft, problems = compose_draft(json.loads(' '.join(args)))
         except ValueError: draft, problems = None, ['Not valid JSON.']
         if draft is None or any(p.startswith(('Not valid', 'Pass', 'Only')) for p in problems): return 'Not shown: ' + ' '.join(problems)
-    s = ask_user({'compose': draft, 'people': type_people() if draft is not None else []}, 115)
+    people = type_people() if draft is not None else []
+    if draft is not None and pref('jarvis', False): draft = compose_people(draft, people)
+    s = ask_user({'compose': draft, 'people': people}, 115)
     s = (s or '').strip()
+    if s in ('sent', 'sent-files'):
+        try: compose_learn()
+        except (OSError, ValueError, TypeError): pass
     if not s: return 'The card is still open and he is still on it. Say nothing; run --compose --wait to keep waiting.'
-    if s == 'sent': return 'Sent from his Gmail through Apple Mail, by his own click. Confirm in a few words.'
+    if s == 'sent': return 'Sent, by his own click (email through Apple Mail from his Gmail, texts through Messages, WhatsApp through WhatsApp). Confirm in a few words.'
+    if s == 'sent-files': return 'The WhatsApp message is sent, by his own click. His files are on the clipboard: tell him to press Command V in the chat, then Enter.'
     if s == 'cancel': return 'He closed the card; nothing was sent. Say so in a few words.'
     if s.startswith('say:'):
-        return (f'While the card was open he said: "{s[4:].strip()[:400]}". If it changes the email, run --compose again with the WHOLE updated draft '
+        return (f'While the card was open he said: "{s[4:].strip()[:400]}". If he names a different person, run --compose again with that name exactly as he said it. If it changes the message, run --compose again with the WHOLE updated draft '
                 '(his typed edits are in the card file below). If he says send it, tell him to press Send on the card; you cannot send. '
                 'If it is about something else, close nothing and answer it.\n' + (open(COMPOSE_NOW).read() if os.path.exists(COMPOSE_NOW) else ''))
     if s == 'noapp': return 'The card needs the app.'

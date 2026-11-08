@@ -9,6 +9,27 @@
   #dim { position: fixed; inset: 0; opacity: 0; transition: opacity .8s ease;
       background: radial-gradient(ellipse at center, rgba(2,1,0,.9) 0%, rgba(2,1,0,.76) 42%, rgba(2,1,0,.55) 100%); }
   canvas { position: fixed; inset: 0; width: 100%; height: 100%; }
+  /* the type-in console: a line drops from the globe and unfolds into a slim bar; contacts suggest above it */
+  #tc { position: fixed; left: 50%; transform: translateX(-50%); visibility: hidden; transition: visibility 0s linear .65s; font-family: "SF Mono", Menlo, monospace; color: #ffdea5; }
+  #tc.on { visibility: visible; transition-delay: 0s; }
+  #tcLine { position: absolute; left: 50%; bottom: 100%; width: 1px; height: 0; background: rgba(255,145,35,.7); transition: height .28s cubic-bezier(.2,.8,.2,1); }
+  #tc.on #tcLine { height: var(--drop); }
+  #tcBar { position: relative; box-sizing: border-box; height: var(--h); display: flex; align-items: center; gap: .9em; padding: 0 1.1em;
+      background: rgba(10,5,1,.88); border: 1px solid rgba(255,145,35,.5); clip-path: inset(0 50% 0 50%); transition: clip-path .38s cubic-bezier(.2,.8,.2,1) .22s; }
+  #tc.on #tcBar { clip-path: inset(0 0 0 0); }
+  #tcBar::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: rgba(255,145,35,.95); }
+  #tcLabel { color: rgba(255,145,35,.85); letter-spacing: .08em; text-transform: uppercase; font-size: .78em; white-space: nowrap; }
+  #tcIn { flex: 1; min-width: 0; background: transparent; border: 0; outline: 0; color: #fff3dc; font: inherit; caret-color: #ffb347; caret-shape: block; letter-spacing: .02em; }
+  #tcHint { color: rgba(255,145,35,.55); font-size: .72em; white-space: nowrap; }
+  #tcLabel, #tcIn, #tcHint { opacity: 0; transition: opacity .25s ease .5s; }
+  #tc.on #tcLabel, #tc.on #tcIn, #tc.on #tcHint { opacity: 1; }
+  #tcList { position: absolute; left: 0; right: 0; bottom: calc(100% + 6px); display: flex; flex-direction: column-reverse; gap: 4px; }
+  .tcItem { display: flex; justify-content: space-between; gap: 1em; padding: .45em 1.1em; background: rgba(10,5,1,.96); border: 1px solid rgba(255,145,35,.28);
+      font-size: .85em; cursor: default; animation: tcIn .22s ease both; }
+  .tcItem b { font-weight: 500; color: #fff3dc; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tcItem span { color: rgba(255,190,110,.75); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tcItem.sel { border-color: rgba(255,170,60,.9); background: rgba(40,18,2,.92); }
+  @keyframes tcIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 </style>
 </head>
 <body>
@@ -16,11 +37,13 @@
 <canvas id="hudBack"></canvas>
 <canvas id="gl"></canvas>
 <canvas id="hud"></canvas>
+<div id="tc"><div id="tcLine"></div><div id="tcList"></div>
+  <div id="tcBar"><span id="tcLabel"></span><input id="tcIn" autocomplete="off" autocapitalize="off" spellcheck="false"><span id="tcHint">↵ send · esc</span></div></div>
 <script>
 'use strict';
 // =====================================================================
-// JARVIS: a globe of amber pixel blocks around a tangled core of light. No text.
-// API for the app: jarvis.wake(), jarvis.sleep(), jarvis.state('idle'|'listen'|'think'|'speak'), jarvis.level(0..1)
+// JARVIS: a globe of amber pixel blocks around a tangled core of light. The only text: task step cards beside it.
+// API for the app: jarvis.wake(), jarvis.sleep(), jarvis.state('idle'|'listen'|'think'|'speak'), jarvis.level(0..1), jarvis.step('Opening Chrome')
 // =====================================================================
 const cv = document.getElementById('gl');
 const gl = cv.getContext('webgl', { alpha: true, premultipliedAlpha: true, antialias: true });
@@ -66,7 +89,7 @@ void main() {
   p = mix(uRot * p, uRotZ * p, uView);
   // alive: while he talks the ring ripples with his voice; thinking sends glints round it; a pulse rolls through on "got it" and on each task step
   float sa = atan(p.y, p.x), wave = 0.5 + 0.5 * sin(sa * 7.0 - uT * 5.0 + h(s + 2.0) * 0.8);
-  p *= 1.0 + uView * uListen * uLevel * 0.03 * wave;
+  p *= 1.0 + uView * uListen * uLevel * 0.06 * wave;
   float da = mod(sa - uOrbit + 3.14159, 6.28318) - 3.14159, db = mod(sa - uOrbit, 6.28318) - 3.14159;
   float glint = exp(-da * da * 30.0) + (da < 0.0 ? exp(da * 3.5) * 0.35 : 0.0) + exp(-db * db * 30.0) * 0.6 + (db < 0.0 ? exp(db * 3.5) * 0.2 : 0.0);
   float pr = length(p.xy) - uPulseR, pulse = uPulseA * exp(-pr * pr * 160.0);
@@ -311,12 +334,139 @@ let phase = 'off', phaseAt = 0;
 const cur = { ...STATES.idle };
 const dimEl = document.getElementById('dim');
 window.jarvis = {
-  state(s) { if (STATES[s]) state = s; }, level(v) { target = Math.max(0, Math.min(1, +v || 0)); },
-  wake() { if (phase === 'on' || phase === 'waking') return; phase = 'waking'; phaseAt = T; fired = {}; dimEl.style.opacity = 1; sweepAt = T + 1.2; run(); },
+  state(s) {
+    if (!STATES[s]) return; state = s;
+    if (s === 'listen') { cards = []; cardsGone = 0; }   // a new ask starts clean
+    else if ((s === 'speak' || s === 'idle') && cards.length && !cardsGone) { for (const c of cards) if (!c.done) { c.done = true; c.doneAt = T; } cardsGone = T; }   // the task is done: tick, then fade
+  }, level(v) { target = Math.max(0, Math.min(1, +v || 0)); },
+  wake() { if (phase === 'on' || phase === 'waking') return; phase = 'waking'; phaseAt = T; fired = {}; cards = []; cardsGone = 0; dimEl.style.opacity = 1; sweepAt = T + 1.2; run(); },
   sleep() { if (phase === 'off' || phase === 'leaving') return; phase = 'leaving'; phaseAt = T; fired = {}; startPulse(1.1, 0, 0.5, 0.8); },
   heard() { if (phase === 'on') { startPulse(1.15, 0, 0.6, 1); flash = Math.max(flash, 0.3); } },   // "got it": a pulse rolls in to the core
-  step() { if (phase === 'on') { startPulse(0.1, 1.2, 0.75, 0.9); gaugeClock += 0.9; } },          // each task step: a pulse rolls out
+  step(text) {                                                                                       // each task step: a pulse rolls out, and its card slides out beside the globe
+    if (phase !== 'on') return; startPulse(0.1, 1.2, 0.75, 0.9); gaugeClock += 0.9;
+    text = String(text || '').replace(/\s+/g, ' ').trim(); if (!text) return;
+    if (text.length > 64) text = text.slice(0, 63) + '…';
+    for (const c of cards) if (!c.done) { c.done = true; c.doneAt = T; }
+    cards.push({ text, at: T, done: false, doneAt: 0, n: ++cardCount }); cardsGone = 0;   // a step after a spoken line mid-task: keep the cards up
+  },
 };
+// ----------------------------- hearing and working: the voice wave ring and the step cards -----------------------------
+const HIST = 96, hist = new Float32Array(HIST); let histAt = 0, histHead = 0, waveW = 0;   // his voice's last ~3 s, newest at the top of the ring
+let cards = [], cardCount = 0, cardsGone = 0;   // cardsGone: when the task ended (the reply started), the cards fade a moment later
+function noteVoice(dt) {
+  histAt += dt;
+  while (histAt >= 1 / 32) { histAt -= 1 / 32; histHead = (histHead + 1) % HIST; hist[histHead] = state === 'listen' ? Math.sqrt(target) : 0; }
+  waveW += ((state === 'listen' && phase === 'on' ? 1 : 0) - waveW) * Math.min(1, dt * 4);
+}
+function drawWave(R, cx, cy) {
+  if (waveW < 0.01) return;
+  const r0 = R * 0.585, amp = R * 0.12, N = 220, pts = [];
+  for (let i = 0; i <= N; i++) {
+    const th = i / N * Math.PI * 2, u = Math.abs(((th + Math.PI) % (Math.PI * 2)) - Math.PI) / Math.PI;   // 0 at the top, 1 at the bottom, mirrored left and right
+    const f = u * (HIST - 1), i0 = Math.floor(f), k = f - i0, at = j => hist[(histHead - j + HIST * 2) % HIST];
+    const v = at(i0) * (1 - k) + at(Math.min(HIST - 1, i0 + 1)) * k;
+    const fine = 0.72 + 0.18 * Math.sin(th * 23 + T * 9) + 0.1 * Math.sin(th * 41 - T * 14);   // a little texture, only where there is voice
+    const r = r0 + amp * v * fine * (1 - u * 0.35), a = th - Math.PI / 2;
+    pts.push(cx + Math.cos(a) * r, cy + Math.sin(a) * r);
+  }
+  const path = () => { hx.beginPath(); hx.moveTo(pts[0], pts[1]); for (let i = 2; i < pts.length; i += 2) hx.lineTo(pts[i], pts[i + 1]); hx.closePath(); };
+  hx.lineJoin = 'round';
+  hx.strokeStyle = `rgba(255,150,40,${0.14 * waveW})`; hx.lineWidth = 7; path(); hx.stroke();
+  hx.strokeStyle = `rgba(255,214,140,${0.9 * waveW})`; hx.lineWidth = 1.6; path(); hx.stroke();
+  hx.strokeStyle = `rgba(255,150,40,${0.18 * waveW})`; hx.lineWidth = 1; hx.beginPath(); hx.arc(cx, cy, r0 - 5, 0, Math.PI * 2); hx.stroke();   // the quiet baseline
+}
+// ----------------------------- the type-in console: jarvis.type({label, kind, people}) / jarvis.typeClose() -----------------------------
+// The app gets {typed: text} on Enter, {typed: null} on Esc. Suggestions come from his Mac Contacts, matched here as he types.
+const tc = document.getElementById('tc'), tcIn = document.getElementById('tcIn'), tcList = document.getElementById('tcList');
+let tcPeople = [], tcKind = 'text', tcSel = -1, tcItems = [];
+const tcPost = v => { try { window.webkit.messageHandlers.jarvis.postMessage({ typed: v }); } catch (e) { console.log('typed', v); } };
+function tcPlace() {
+  const R = H * 0.35, fs = Math.max(13, Math.round(R * 0.04)), w = Math.min(W - 32, Math.max(fs * 26, R * 1.7));
+  tc.style.fontSize = fs + 'px'; tc.style.width = w + 'px'; tc.style.top = (H / 2 + R * 1.1) + 'px';
+  tc.style.setProperty('--h', Math.round(fs * 2.6) + 'px'); tc.style.setProperty('--drop', Math.round(R * 0.1) + 'px');
+}
+addEventListener('resize', tcPlace);
+const digits = s => (s || '').replace(/\D/g, '');
+function tcMatch(q) {
+  q = q.trim().toLowerCase(); if (q.length < 2) return [];
+  const qd = digits(q), out = [];
+  for (const p of tcPeople) {
+    const name = p.name.toLowerCase(), byName = name.split(/\s+/).some(w => w.startsWith(q)) || name.startsWith(q);
+    const vals = tcKind === 'email' ? p.emails : tcKind === 'phone' ? p.phones : [p.name];
+    for (const v of vals) {
+      const hit = byName || (tcKind === 'email' && v.toLowerCase().includes(q)) || (tcKind === 'phone' && qd.length >= 3 && digits(v).includes(qd));
+      if (hit) out.push({ name: p.name, value: v });
+      if (out.length >= 4) return out;
+    }
+  }
+  return out;
+}
+function tcRender() {
+  tcItems = tcKind === 'url' ? [] : tcMatch(tcIn.value); tcSel = Math.min(tcSel, tcItems.length - 1);
+  tcList.innerHTML = '';
+  tcItems.forEach((it, i) => {
+    const d = document.createElement('div'), b = document.createElement('b'), s = document.createElement('span');
+    d.className = 'tcItem' + (i === tcSel ? ' sel' : ''); b.textContent = it.name; s.textContent = it.value === it.name ? '' : it.value;
+    d.append(b, s); d.onmousedown = e => { e.preventDefault(); tcPick(i); }; tcList.append(d);
+  });
+}
+function tcPick(i) { const it = tcItems[i]; if (!it) return; tcIn.value = it.value; tcSel = -1; tcRender(); tcIn.focus(); }
+function tcDone(v) { if (!tc.classList.contains('on')) return; tcPost(v); jarvis.typeClose(); if (v !== null) jarvis.heard(); }
+tcIn.addEventListener('input', () => { tcSel = -1; tcRender(); });
+tcIn.addEventListener('keydown', e => {
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {   // the list grows upward: up moves away from the bar
+    if (!tcItems.length) return; e.preventDefault();
+    tcSel = e.key === 'ArrowUp' ? Math.min(tcItems.length - 1, tcSel + 1) : Math.max(-1, tcSel - 1); tcRender();
+  } else if (e.key === 'Tab' && tcItems.length) { e.preventDefault(); tcPick(Math.max(0, tcSel)); }
+  else if (e.key === 'Enter') { e.preventDefault(); if (tcSel >= 0) tcPick(tcSel); else if (tcIn.value.trim()) tcDone(tcIn.value.trim()); }
+  else if (e.key === 'Escape') { e.preventDefault(); tcDone(null); }
+});
+Object.assign(window.jarvis, {
+  type(o) {
+    o = o || {}; tcPeople = Array.isArray(o.people) ? o.people : []; tcKind = ['email', 'phone', 'url'].includes(o.kind) ? o.kind : 'text';
+    document.getElementById('tcLabel').textContent = String(o.label || 'Type it').slice(0, 40);
+    tcIn.value = ''; tcIn.type = tcKind === 'email' ? 'email' : tcKind === 'url' ? 'url' : 'text'; tcIn.inputMode = tcKind === 'phone' ? 'tel' : tcKind;
+    tcSel = -1; tcRender(); tcPlace(); tc.classList.add('on'); setTimeout(() => tcIn.focus(), 60);
+  },
+  typeClose() { tc.classList.remove('on'); tcIn.blur(); tcList.innerHTML = ''; tcItems = []; },
+  typing() { return tc.classList.contains('on'); },
+});
+function drawCards(R, cx, cy, hudP) {
+  if (!cards.length) return;
+  if (cardsGone && T - cardsGone > 3.2) { cards = []; cardsGone = 0; return; }
+  const fade = (cardsGone ? 1 - clamp01((T - cardsGone - 2.4) / 0.8) : 1) * hudP;
+  const fs = Math.max(12, Math.round(R * 0.036)), gap = Math.round(fs * 2.9), h = Math.round(fs * 2.3);
+  const w = R * 0.95, x0 = Math.min(cx + R * 1.36, W - 24 - w), top = cy - R * 0.08;   // a narrow screen: the cards move in rather than get cut
+  const shown = cards.slice(-4), first = shown[0];
+  hx.font = `500 ${fs}px "SF Mono", Menlo, monospace`; hx.textBaseline = 'middle';
+  shown.forEach((c, i) => {
+    const e = T - c.at, old = cards.length - 4 > 0 && c === first ? clamp01((T - cards[cards.length - 1].at) / 0.4) : 0;   // the oldest of five slips away
+    const slide = ease(e / 0.45), a = fade * slide * (1 - old) * (c.done ? 0.62 : 1);
+    if (a < 0.01) return;
+    const y = top + i * gap, x = x0 + (1 - slide) * R * 0.18, c1 = v => `rgba(255,145,35,${Math.min(1, v * a)})`, c2 = v => `rgba(255,222,165,${Math.min(1, v * a)})`;
+    if (!c.done) {   // the live step: a line reaches out from the globe's edge to its card
+      const ang = Math.asin(Math.max(-0.95, Math.min(0.95, (y - cy) / (R * 1.05)))), sx = cx + Math.cos(ang) * R * 1.05, sy = cy + Math.sin(ang) * R * 1.05;
+      const k = ease(e / 0.3), mx = cx + R * 1.28;
+      hx.strokeStyle = c1(0.55); hx.lineWidth = 1; hx.beginPath(); hx.moveTo(sx, sy);
+      const ex = sx + (mx - sx) * k; hx.lineTo(ex, sy + (y - sy) * k); if (k >= 1) hx.lineTo(x, y); hx.stroke();
+      hx.fillStyle = c2(0.9); hx.fillRect(sx - 2, sy - 2, 4, 4);
+    }
+    hx.fillStyle = `rgba(10,5,1,${0.85 * a})`; hx.fillRect(x, y - h / 2, w, h);
+    hx.strokeStyle = c1(0.45); hx.lineWidth = 1; hx.strokeRect(x + 0.5, y - h / 2 + 0.5, w - 1, h - 1);
+    hx.fillStyle = c1(0.9); hx.fillRect(x, y - h / 2, 3, h);
+    hx.fillStyle = c1(0.7); hx.fillText(String(c.n).padStart(2, '0'), x + fs * 0.9, y);
+    const typed = c.text.slice(0, Math.floor(clamp01((e - 0.15) * 45 / c.text.length) * c.text.length));   // types out, ~45 letters a second
+    let t = typed; const room = w - fs * 6.2;
+    while (t.length > 1 && hx.measureText(t).width > room) t = t.slice(0, -2) + '…';
+    hx.fillStyle = c2(0.95); hx.fillText(t, x + fs * 2.9, y);
+    const mx = x + w - fs * 1.4;
+    if (c.done) {   // a tick
+      hx.strokeStyle = c2(0.9); hx.lineWidth = 1.6; hx.beginPath(); hx.moveTo(mx - fs * 0.35, y); hx.lineTo(mx - fs * 0.08, y + fs * 0.28); hx.lineTo(mx + fs * 0.4, y - fs * 0.3); hx.stroke();
+    } else {        // working: a small turning arc
+      hx.strokeStyle = c2(0.9); hx.lineWidth = 1.6; hx.beginPath(); hx.arc(mx, y, fs * 0.36, T * 5, T * 5 + Math.PI * 1.3); hx.stroke();
+    }
+  });
+}
 const clamp01 = x => Math.max(0, Math.min(1, x)), ease = x => 1 - Math.pow(1 - clamp01(x), 3);
 const easeIO = x => { x = clamp01(x); return x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2; };
 const backOut = x => { x = clamp01(x); const c = 1.8; return 1 + (c + 1) * Math.pow(x - 1, 3) + c * Math.pow(x - 1, 2); };
@@ -379,6 +529,7 @@ function drawHud(R, cx, cy, tl) {
     for (let i = 0; i < 24; i++) { const a = i / 24 * Math.PI * 2 - gaugeClock * 0.4; hx.strokeStyle = c((i % 6 ? 0.3 : 0.7) * p); hx.beginPath(); hx.moveTo(gx + Math.cos(a) * gr * 1.08, gy + Math.sin(a) * gr * 1.08); hx.lineTo(gx + Math.cos(a) * gr * 1.22, gy + Math.sin(a) * gr * 1.22); hx.stroke(); }
     hx.fillStyle = c(0.9 * p); hx.beginPath(); hx.arc(gx, gy, 2.5, 0, Math.PI * 2); hx.fill();
   }
+  drawWave(R, cx, cy); drawCards(R, cx, cy, p);
   if (flash > 0.01) {
     const gR = R * (0.25 + flash * 0.55), g = hx.createRadialGradient(cx, cy, 0, cx, cy, gR);
     g.addColorStop(0, `rgba(255,235,190,${flash * 0.7})`); g.addColorStop(0.4, `rgba(255,150,40,${flash * 0.2})`); g.addColorStop(1, 'rgba(255,110,20,0)');
@@ -416,6 +567,7 @@ function frame(now) {
   const s = STATES[state]; for (const k in cur) cur[k] += (s[k] - cur[k]) * Math.min(1, dt * 2);
   level += (target - level) * Math.min(1, dt * (target > level ? 8 : 3));   // a soft, even glow with the voice
   flash *= Math.exp(-dt * 2.6);
+  noteVoice(dt);
   const tl = timeline(), lv = Math.min(1, (phase === 'on' ? level : 0) + flash * 0.3);
   spinAng += dt * cur.spin; ringAng += dt * cur.ring; coreClock += dt * cur.core * (1 + lv * 0.6); gaugeClock += dt * (0.4 + cur.spin * 2);
   rotW = mat(spinAng, 0.3); rotZ = matZ(ringAng);

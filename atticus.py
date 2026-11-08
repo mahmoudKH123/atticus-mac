@@ -602,7 +602,7 @@ RISKY = [('Delete something?', r'\b(rm|rmdir|srm|unlink|shred|trash|mv)\s|\bdele
 RISKY_LABEL = r"(?i)\b(buy|purchase|pay|payment|checkout|order|send|delete|remove|trash|submit|publish|post|sign.?out|log.?out|unsubscribe|subscribe|transfer|bid|erase|withdraw|donate|authorize|grant access|allow access|logout|book|reserve|merge|deploy|discard|wipe|format|apply(?! filters| changes| settings| coupon| code| promo| discount| theme| style| formatting)|confirm)\b"
 RUNS = ('.command', '.tool', '.terminal', '.sh', '.zsh', '.bash', '.app', '.workflow', '.action')   # macOS runs these when opened
 APP_DIRS = ('/Applications/', '/System/Applications/', os.path.join(HOME, 'Applications') + '/')
-QUIET = (DRAW, SEARCH, READ, LOOK, FRONT, SHOW, PLACE, PLAY, QUEUE, TYPE, REMEMBER, FORGET, ABOUT, PICK, SET, WEB, HISTORY, HANDS, WINDOW, f'{shlex.quote(ME)} --calendar ', f'{shlex.quote(ME)} --reminders ', f'{shlex.quote(ME)} --mac ', f'{shlex.quote(ME)} --timer ', f'{shlex.quote(ME)} --mail ', f'{shlex.quote(ME)} --shop ', f'{shlex.quote(ME)} --whatsapp ', 'open ', 'mdfind ', 'pbpaste')   # helpers confirm their own risky actions
+QUIET = (DRAW, SEARCH, READ, LOOK, FRONT, SHOW, PLACE, PLAY, QUEUE, TYPE, REMEMBER, FORGET, ABOUT, PICK, SET, WEB, HISTORY, HANDS, WINDOW, f'{shlex.quote(ME)} --calendar ', f'{shlex.quote(ME)} --reminders ', f'{shlex.quote(ME)} --mac ', f'{shlex.quote(ME)} --timer ', f'{shlex.quote(ME)} --mail ', f'{shlex.quote(ME)} --shop ', f'{shlex.quote(ME)} --whatsapp ', f'{shlex.quote(ME)} --typein ', 'open ', 'mdfind ', 'pbpaste')   # helpers confirm their own risky actions
 
 
 def launches_program(part):
@@ -769,6 +769,8 @@ def gate():
         decision(False, f'Run {SEARCH} "<query>" first; WebSearch only if it fails or misses.'); return
     if os.environ.get('ATTICUS_AGENT') and event.get('tool_name') == 'Bash' and re.search(r'(?:^|[\s;&|(/])open\s[^;&|]*https?://', inp.get('command', '')):
         decision(False, f'Open web pages with {ME} --web read "<url>": it uses this task\'s own browser window, never the user\'s tabs.'); return
+    if pref('jarvis', False) and jarvis_send_tool(event.get('tool_name', '')):   # JARVIS never sends for him, not even with a spoken yes (08/11: an agent sent "Hey dad")
+        decision(False, JARVIS_SEND_STOP); return
     agent_approved = False
     if event.get('tool_name', '').startswith('mcp__') and (pref('safe', True) or os.environ.get('ATTICUS_AGENT_PREP') == '1'):
         annotations = connector_annotations(event, os.environ.get('ATTICUS_ASK', ''))
@@ -5400,7 +5402,7 @@ def agents_service():
     finally: manager.close()
 
 
-JARVIS_TOOLS = f"\nReminders (any language): {shlex.quote(ME)} --reminders --help for JSON list/add/edit/complete/delete; always use it, never AppleScript.\nMac controls: {shlex.quote(ME)} --mac --help (volume, mute, brightness, dark mode, Wi-Fi, Bluetooth, airplane mode, Do Not Disturb, screenshot, lock, screen off, status); use it for these.\nTimers and alarms: {shlex.quote(ME)} --timer --help; use it, never sleep or AppleScript.\nOther Mac settings: open x-apple.systempreferences:<page id>, then {HANDS}; every change there asks him first. Security and privacy pages, sudo and security commands are blocked: open the page and let him change it.\nEmail (his personal Gmail): {shlex.quote(ME)} --mail '<what he wants, in plain words>'; it reads, searches, summarises and saves drafts, never sends. Say its answer in your own short words; he sends drafts himself.\nOrders and deliveries (any shop): {shlex.quote(ME)} --orders gives his current orders from Gmail; answer from it in a sentence or two.\nLanguage: he may speak Egyptian Arabic or mix it with English, in Arabic script or transliterated (\"eftah Spotify\", \"fakkarni bokra\"); understand it and always answer in English. Speech recognition may write English words in Arabic letters (\"سبوتيفاي\" = Spotify).\nWhatsApp: {shlex.quote(ME)} --whatsapp '<name>' '<message>' (people in his contacts only). Tidy what he said into a short, casual message in his own voice and in the language he used (\"tell Ahmed I'm running late\" -> \"Running a bit late, sorry!\"). It opens the chat with the text typed; he presses send. Never claim it was sent; say it's ready for him to send.\nShopping: one step, no browsing: {shlex.quote(ME)} --shop '<short search phrase>' [shops] [--cheapest when he wants the cheapest]. Shops: the one he names, else the right ones for the item (default amazon noon jumia; add 2b for electronics, ikea for furniture and home, carrefour for groceries; aliexpress or temu only if he says cheap or from abroad). Then a few words ('Amazon, Noon and Jumia are up, sir.') and stop: he takes it from there. Never read options, add to cart or check out unless he asks; never type card numbers or passwords; the final buy button is always his."
+JARVIS_TOOLS = f"\nReminders (any language): {shlex.quote(ME)} --reminders --help for JSON list/add/edit/complete/delete; always use it, never AppleScript.\nMac controls: {shlex.quote(ME)} --mac --help (volume, mute, brightness, dark mode, Wi-Fi, Bluetooth, airplane mode, Do Not Disturb, screenshot, lock, screen off, status); use it for these.\nTimers and alarms: {shlex.quote(ME)} --timer --help; use it, never sleep or AppleScript.\nOther Mac settings: open x-apple.systempreferences:<page id>, then {HANDS}; every change there asks him first. Security and privacy pages, sudo and security commands are blocked: open the page and let him change it.\nEmail (his personal Gmail): {shlex.quote(ME)} --mail '<what he wants, in plain words>'; it reads, searches, summarises and saves drafts, never sends. Do email yourself, here, never as a background agent. To write one: get the whole message first, then always open --typein 'Email address' email for the recipient and use exactly what he types, then save the draft with --mail. Say its answer in your own short words; he sends drafts himself.\nOrders and deliveries (any shop): {shlex.quote(ME)} --orders gives his current orders from Gmail; answer from it in a sentence or two.\nLanguage: he may speak Egyptian Arabic or mix it with English, in Arabic script or transliterated (\"eftah Spotify\", \"fakkarni bokra\"); understand it and always answer in English. Speech recognition may write English words in Arabic letters (\"سبوتيفاي\" = Spotify).\nWhatsApp: {shlex.quote(ME)} --whatsapp '<name>' '<message>' (people in his contacts only). Tidy what he said into a short, casual message in his own voice and in the language he used (\"tell Ahmed I'm running late\" -> \"Running a bit late, sorry!\"). It opens the chat with the text typed; he presses send. Never claim it was sent; say it's ready for him to send.\nTyping: when you need something exact (an email address, phone number, URL, spelling of a name, a code or reference) and he hasn't spelled it clearly, or he says 'let me type it', run {shlex.quote(ME)} --typein '<short label, e.g. Email address>' [email|phone|url|text] after one short spoken line ('Type the address, sir.'); it waits while he types (his contacts are suggested) and prints exactly what he typed. Use that text exactly. Never for passwords, PINs or codes sent to him.\nShopping: one step, no browsing: {shlex.quote(ME)} --shop '<short search phrase>' [shops] [--cheapest when he wants the cheapest]. Shops: the one he names, else the right ones for the item (default amazon noon jumia; add 2b for electronics, ikea for furniture and home, carrefour for groceries; aliexpress or temu only if he says cheap or from abroad). Then a few words ('Amazon, Noon and Jumia are up, sir.') and stop: he takes it from there. Never read options, add to cart or check out unless he asks; never type card numbers or passwords; the final buy button is always his."
 
 JARVIS = """
 JARVIS mode (overrides your name, reply length and tone above): you're Jarvis, his own AI, running his Mac and his day. Talk like a quick-witted British right hand: composed, dry, understated, warm, a bit cheeky. Polished, never stiff or scripted.
@@ -5538,6 +5540,12 @@ def relay(p=None, directory=None):
                 if os.environ.get('ATTICUS_UI') == '1' and re.fullmatch(r'[a-f0-9]{32}', ident):
                     print(('▥ ' if j.get('view') else '▤ ') + ident, flush=True)
                 Path(a + '.tmp').write_text('ok')
+                os.rename(a + '.tmp', a)
+            elif 'type' in j and os.environ.get('ATTICUS_UI') == '1':   # "⌨ {json}": JARVIS's type-in console
+                print('⌨ ' + json.dumps({'label': j['type'], 'kind': j.get('kind', 'text'), 'people': j.get('people', []), 'a': a}, ensure_ascii=False), flush=True)
+            elif 'type' in j:   # no app: a plain dialog
+                r = osa('on run argv\nset r to text returned of (display dialog (item 1 of argv) default answer "")\nreturn r\nend run', j['type'])
+                Path(a + '.tmp').write_text(r or '')
                 os.rename(a + '.tmp', a)
             elif 'pick' in j and os.environ.get('ATTICUS_UI') == '1':   # "◇ {json}": the choices card
                 print('◇ ' + json.dumps({'q': j['pick'], 'options': choices(j['options']), 'a': a}), flush=True)
@@ -7150,6 +7158,31 @@ JARVIS_BUY_STOP = ('Stopped: that button completes the purchase, and he always p
                    'the total and the delivery date, and that it is ready for him to buy. Do not try another way.')
 
 
+# JARVIS mode type-in: when JARVIS needs something exact (an email address, a number, a spelling) he types it in a console under the
+# globe, with his Mac Contacts as suggestions. Never for passwords or other secrets: those stay his to type in the real app.
+TYPE_KINDS = ('email', 'phone', 'url', 'text')
+TYPE_SECRET = re.compile(r'pass\s*(word|code|phrase)|\bpin\b|otp|one.time|verification code|2fa|cvv|cvc|card number|iban|api.?key|token|secret|كلمة (ال)?سر', re.I)
+def type_people():
+    """[{name, emails, phones}] for everyone in Mac Contacts with an email or phone, read in one bulk call (~0.7 s for 700 people)."""
+    script = 'var a = Application("Contacts"); JSON.stringify([a.people.name(), a.people.emails.value(), a.people.phones.value()])'
+    try:
+        r = subprocess.run(['osascript', '-l', 'JavaScript', '-e', script], capture_output=True, text=True, timeout=8)
+        names, emails, phones = json.loads(r.stdout) if r.returncode == 0 else ([], [], [])
+    except (OSError, ValueError, subprocess.TimeoutExpired): return []
+    return [{'name': n or '', 'emails': [x for x in e if x][:3], 'phones': [x for x in p if x][:3]} for n, e, p in zip(names, emails, phones) if n and (e or p)]
+
+def type_tool(args):
+    """--typein '<label>' [email|phone|url|text]: prints what he typed, or that he cancelled."""
+    label, kind = (args[:1] or [''])[0].strip()[:60], (args[1:2] or ['text'])[0]
+    if not label: return 'Usage: --typein "<label, e.g. Email address>" [email|phone|url|text]'
+    if kind not in TYPE_KINDS: kind = 'text'
+    if TYPE_SECRET.search(label): return 'Not for passwords, codes or other secrets: he types those himself in the app that asks. Tell him so in a few words.'
+    if not os.environ.get('ATTICUS_ASK'): return 'Typing needs the app. Ask him to say it instead.'
+    s = ask_user({'type': label, 'kind': kind, 'people': type_people() if kind in ('email', 'phone', 'text') else []}, 115)
+    s = (s or '').strip()
+    return f'He typed: {s[:500]}' if s else 'He cancelled or did not type anything. Do not guess; ask him in a few words how he wants to go on.'
+
+
 # JARVIS mode WhatsApp: opens the person's chat in WhatsApp Desktop with the message typed; he presses send. The number comes only
 # from his Mac Contacts (never guessed); WhatsApp's own link (whatsapp://send) only fills the box, it cannot send.
 def whatsapp_number(phone):
@@ -7222,6 +7255,15 @@ def shop_tool(args):
 
 def jarvis_buy_click(labels):
     return any(re.search(JARVIS_BUY, str(label or '')) for label in labels)
+
+
+# JARVIS mode never sends anything for him: no email, message, reply, forward, post or invite from any connector, in the chat or a background
+# agent. Email goes through --mail, which only saves drafts; he sends them himself.
+JARVIS_SEND = re.compile(r'^mcp__.+__(?:\w*_)?(?:send|reply|forward|post|publish|invite|share|respond)(?:_\w*)?$', re.I)
+JARVIS_SEND_STOP = (f'Blocked: JARVIS never sends anything for him. For email use {shlex.quote(ME)} --mail to save a draft, then tell him it is in '
+                    'Drafts for him to send. Do not try another way.')
+def jarvis_send_tool(name):
+    return bool(JARVIS_SEND.search(name or ''))
 
 
 def jarvis_buy_command(cmd):
@@ -8487,6 +8529,8 @@ def main():
         return print(mail_tool(args[1:]))
     if args[:1] == ['--whatsapp']:
         return print(whatsapp_tool(args[1:]))
+    if args[:1] == ['--typein']:
+        return print(type_tool(args[1:]))
     if args[:1] == ['--shop']:
         return print(shop_tool(args[1:]))
     if args[:1] == ['--orders']:

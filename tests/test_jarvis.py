@@ -489,7 +489,7 @@ class JarvisResponsivenessTests(unittest.TestCase):
         self.assertIn('guard Prefs.bool("jarvis"), Prefs.bool("speak"), handsFree, offerText == nil, !heard.isEmpty, !Self.endsJarvisChat(heard)', filler)
         self.assertIn('jarvisSpeakLive("", track: false)', filler)   # deliver() must not mistake it for the start of the reply
         self.assertIn('if track { jarvisVoiced += " " + sentence }', app)
-        self.assertIn('func endPause() -> Double { Prefs.bool("jarvis") ? (Self.soundsUnfinished(text) ? 3.0 : 1.5) : 1.3 }', app)   # upstream keeps 1.3 s
+        self.assertIn('func endPause() -> Double { Prefs.bool("jarvis") ? (Self.soundsUnfinished(text) ? 3.0 : jarvisAsked ? 2.5 : 1.5) : 1.3 }', app)   # upstream keeps 1.3 s
         self.assertIn('never open with another acknowledgement', atticus.JARVIS)
 
     def test_voice_service_comes_back_and_quick_replies_are_prerendered(self):
@@ -526,11 +526,14 @@ class JarvisResponsivenessTests(unittest.TestCase):
         page = open(os.path.join(os.path.dirname(__file__), '..', 'ui', 'jarvis.html')).read()
         back = page[page.index('function drawBack('):page.index('function drawHud(')]
         self.assertNotIn('arc(', back)   # the outer disc and its rim are gone
-        for api in ("heard() {", "step() {", "work:   {"):
+        for api in ("heard() {", "step(text) {", "work:   {", "function drawWave(", "function drawCards(", "drawWave(R, cx, cy); drawCards(R, cx, cy, p);"):
             self.assertIn(api, page)
         app = self.source()
         self.assertIn('if Prefs.bool("jarvis") && !dictating { face.run("jarvis.heard()") }', app)
-        self.assertIn('if line.hasPrefix("▸ "), Prefs.bool("jarvis") { self.jarvisStepAt = Date(); self.face.run("jarvis.step()") }', app)
+        step = app[app.index('if line.hasPrefix("▸ "), Prefs.bool("jarvis") {'):]
+        self.assertIn('self.jarvisStepAt = Date()', step[:700])
+        self.assertIn('JSONSerialization.data(withJSONObject: String(line.dropFirst(2)), options: .fragmentsAllowed)', step[:700])   # the step text reaches the page as a safe JS string
+        self.assertIn('self.face.run("jarvis.step(\\(text))")', step[:700])
         self.assertIn('busy ? (Date().timeIntervalSince(jarvisStepAt) < 3 ? "work" : "think") : "idle"', app)
 
     def test_misheard_words_go_to_the_nearest_command_or_name(self):
@@ -676,6 +679,79 @@ class JarvisResponsivenessTests(unittest.TestCase):
             self.assertEqual(atticus.whatsapp_tool(['Karim', 'hi']), 'Contacts are not reachable right now.')
         self.assertIn('Never claim it was sent', atticus.JARVIS_TOOLS)
         self.assertIn(f"{atticus.shlex.quote(atticus.ME)} --whatsapp ", atticus.QUIET)
+
+
+
+class JarvisTypeInTests(unittest.TestCase):   # the type-in console for exact text (addresses, numbers, spellings)
+    def test_never_for_secrets(self):
+        with patch.dict(os.environ, {'ATTICUS_ASK': '/nonexistent'}), patch.object(atticus, 'ask_user') as ask:
+            for label in ('Gmail password', 'Verification code', 'PIN', 'Card number', 'API key', 'OTP'):
+                self.assertIn('Not for passwords', atticus.type_tool([label, 'text']), label)
+            ask.assert_not_called()
+
+    def test_returns_exactly_what_he_typed_or_cancel(self):
+        with patch.dict(os.environ, {'ATTICUS_ASK': '/x'}), patch.object(atticus, 'type_people', return_value=[{'name': 'A', 'emails': ['a@b.co'], 'phones': []}]):
+            with patch.object(atticus, 'ask_user', return_value='  ahmed@westcon.com ') as ask:
+                self.assertEqual(atticus.type_tool(['Email address', 'email']), 'He typed: ahmed@westcon.com')
+                q = ask.call_args[0][0]
+                self.assertEqual((q['type'], q['kind'], len(q['people'])), ('Email address', 'email', 1))
+            with patch.object(atticus, 'ask_user', return_value=''):
+                self.assertIn('cancelled', atticus.type_tool(['Email address', 'email']))
+            with patch.object(atticus, 'ask_user', return_value=None):
+                self.assertIn('cancelled', atticus.type_tool(['Email address', 'weird']))
+            with patch.object(atticus, 'ask_user', return_value='x') as ask:
+                atticus.type_tool(['Website', 'url'])
+                self.assertEqual(ask.call_args[0][0]['people'], [])   # no contacts for a URL
+
+    def test_wired_through_prompt_relay_page_and_app(self):
+        self.assertIn('--typein', atticus.JARVIS_TOOLS)
+        self.assertIn(f"{atticus.shlex.quote(atticus.ME)} --typein ", atticus.QUIET)
+        src = open(atticus.ME).read()
+        self.assertIn("elif 'type' in j and os.environ.get('ATTICUS_UI') == '1':", src)
+        self.assertIn("print('⌨ ' + json.dumps({'label': j['type']", src)
+        page = open(os.path.join(os.path.dirname(__file__), '..', 'ui', 'jarvis.html')).read()
+        for api in ('type(o) {', 'typeClose() {', 'messageHandlers.jarvis.postMessage({ typed: v })', 'function tcMatch('):
+            self.assertIn(api, page)
+        app = open(os.path.join(os.path.dirname(__file__), '..', 'Atticus.swift')).read()
+        for wire in ('config.userContentController.add(self, name: "jarvis")', 'if face.typing { face.typeClose(); answerTyped(nil); return }',
+                     'if line.hasPrefix("⌨ ")', 'let p = KeyPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel]'):
+            self.assertIn(wire, app)
+
+
+class JarvisNeverSendsTests(unittest.TestCase):   # 08/11: background agents sent two real emails with the card's "Always allow for this task"
+    def test_send_tools_are_caught_and_drafts_are_not(self):
+        for name in ('mcp__claude_ai_Gmail__send_message', 'mcp__claude_ai_Gmail__send_draft', 'mcp__claude_ai_Gmail__reply', 'mcp__claude_ai_Gmail__forward',
+                     'mcp__0987200f__send_message', 'mcp__slack__slack_send_message', 'mcp__x__post_message', 'mcp__cal__respond_to_event'):
+            self.assertTrue(atticus.jarvis_send_tool(name), name)
+        for name in ('mcp__claude_ai_Gmail__create_draft', 'mcp__claude_ai_Gmail__update_draft', 'mcp__claude_ai_Gmail__search_threads',
+                     'mcp__claude_ai_Gmail__get_message', 'mcp__cal__list_events', 'Bash', ''):
+            self.assertFalse(atticus.jarvis_send_tool(name), name)
+
+    def test_gate_blocks_before_any_approval_card(self):
+        src = open(atticus.ME).read(); gate = src[src.index('def gate():'):src.index('\ndef ', src.index('def gate():') + 10)]
+        block = gate.index("if pref('jarvis', False) and jarvis_send_tool(event.get('tool_name', '')):")
+        self.assertLess(block, gate.index("answer = 'y' if task_allowed(kind) else ask_user({'q': 'Allow this connector action?'"))   # no Allow button can reach a send
+        self.assertLess(block, gate.index("if os.environ.get('ATTICUS_AGENT') and pref('safe', True) and event.get('tool_name') in ('Bash', 'Write', 'Edit')"))
+
+    def test_email_stays_here_and_confirms_the_address(self):
+        email = next(l for l in atticus.JARVIS_TOOLS.split('\n') if l.startswith('Email'))
+        self.assertIn('never as a background agent', email)
+        self.assertIn("always open --typein 'Email address' email for the recipient", email)
+
+
+class JarvisHearingFixTests(unittest.TestCase):
+    def test_whisper_keeps_confident_words_and_waits_longer_after_a_question(self):
+        app = open(os.path.join(os.path.dirname(__file__), '..', 'Atticus.swift')).read()
+        self.assertIn('(s["no_speech_prob"] as? Double ?? 0) >= 0.6 && (!jarvis || (s["avg_logprob"] as? Double ?? -9) < -1.0)', app)
+        self.assertIn('NSLog("JARVIS drops %d of %d segments as not speech"', app)
+        self.assertIn('jarvisAsked ? 2.5 : 1.5', app)
+        self.assertIn('jarvisAsked = Prefs.bool("jarvis") && a.trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix("?")', app)
+
+
+    def test_card_reply_never_waits_in_silence(self):   # 08/11: an unconfirmed spoken pick left the card waiting with the mic off
+        app = open(os.path.join(os.path.dirname(__file__), '..', 'Atticus.swift')).read()
+        self.assertIn('if Prefs.bool("jarvis"), !drawingReply, !partial.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return finishOrSignOff() }', app)
+        self.assertIn('if Prefs.bool("jarvis"), picking || jarvisApproval { jarvisSpeakLive("Sorry, sir, say that again?"); jarvisEndLive(); jarvisCardListen() }', app)
 
 
 if __name__ == '__main__':

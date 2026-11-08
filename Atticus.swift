@@ -609,9 +609,13 @@ final class Whisper: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
             }
         }
         // segments Whisper itself rates as probably not speech are its hallucinations
+        // JARVIS: Whisper's own rule: not speech only when the no-speech odds are high AND the words are unsure (08/11: "Hey dad, I'll be home..."
+        // came through as just "Hey dad"; the no-speech odds alone also drop real words)
         let segments = json["segments"] as? [[String: Any]] ?? []
-        let text = segments.isEmpty ? json["text"] as? String ?? ""
-            : segments.filter { ($0["no_speech_prob"] as? Double ?? 0) < 0.6 }.compactMap { $0["text"] as? String }.joined()
+        let notSpeech = { (s: [String: Any]) -> Bool in (s["no_speech_prob"] as? Double ?? 0) >= 0.6 && (!jarvis || (s["avg_logprob"] as? Double ?? -9) < -1.0) }
+        let kept = segments.filter { !notSpeech($0) }
+        if jarvis, kept.count < segments.count { NSLog("JARVIS drops %d of %d segments as not speech", segments.count - kept.count, segments.count) }   // counts only, no words
+        let text = segments.isEmpty ? json["text"] as? String ?? "" : kept.compactMap { $0["text"] as? String }.joined()
         let said = text.split(whereSeparator: \.isWhitespace).joined(separator: " ")
         let letters = said.unicodeScalars.filter { CharacterSet.letters.contains($0) }.count   // "." or "A" is noise, not words
         return jarvis && (letters < 2 || Self.madeUp(said) || isEcho(said)) ? "" : said   // as if silent: he keeps listening
@@ -755,21 +759,23 @@ AudioRecovery.start()
 // Starts the Kokoro voice service in the background (no-op if it's running or not installed).
 // JARVIS mode: the full-screen face, on the Lenovo when it's connected, else this Mac's own screen. Transparent,
 // click-through, over the menu bar and Dock. It shows no text: everything is spoken.
-final class JarvisFace: NSObject, WKNavigationDelegate {
+final class JarvisFace: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
     private var panel: NSPanel?, web: WKWebView?, ready = false, queue: [String] = [], hideGen = 0
-    private(set) var shown = false
+    private(set) var shown = false, typing = false
+    var onTyped: ((String?) -> Void)?   // the type-in console: what he typed, or nil when he pressed Esc
     static func screen() -> NSScreen? {
         let id = { (s: NSScreen) in (s.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0 }
         return NSScreen.screens.first { s in ["legion", "lenovo"].contains { s.localizedName.lowercased().contains($0) } }
             ?? NSScreen.screens.first { CGDisplayIsBuiltin(id($0)) != 0 } ?? NSScreen.main
     }
     private func make() -> NSPanel {
-        let p = NSPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        let p = KeyPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)   // takes typing only while the console is open
         p.isReleasedWhenClosed = false; p.isOpaque = false; p.backgroundColor = .clear; p.hasShadow = false; p.ignoresMouseEvents = true
         p.hidesOnDeactivate = false; p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
         p.level = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue - 1)
         applySharing(p)
-        let w = WKWebView(frame: .zero, configuration: WKWebViewConfiguration()); w.setValue(false, forKey: "drawsBackground"); w.navigationDelegate = self
+        let config = WKWebViewConfiguration(); config.userContentController.add(self, name: "jarvis")
+        let w = WKWebView(frame: .zero, configuration: config); w.setValue(false, forKey: "drawsBackground"); w.navigationDelegate = self
         loadPage(w, "jarvis.html"); p.contentView = w; web = w; panel = p
         return p
     }
@@ -782,8 +788,24 @@ final class JarvisFace: NSObject, WKNavigationDelegate {
         let p = panel ?? make(); hideGen += 1; shown = true
         p.setFrame(screen.frame, display: true); p.orderFrontRegardless(); run("jarvis.wake()")
     }
+    // The type-in console: the face window takes the keyboard and mouse (without bringing Atticus forward) until Enter or Esc.
+    func type(_ json: String) {
+        if !shown { wake() }
+        guard let p = panel, let w = web else { return }
+        typing = true; p.ignoresMouseEvents = false; p.makeKey(); p.makeFirstResponder(w); run("jarvis.type(\(json))")
+    }
+    func typeClose() {
+        guard typing else { return }
+        typing = false; run("jarvis.typeClose()"); panel?.ignoresMouseEvents = true; panel?.resignKey()
+    }
+    func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard typing, let b = message.body as? [String: Any], b.keys.contains("typed") else { return }
+        typing = false; panel?.ignoresMouseEvents = true; panel?.resignKey()
+        onTyped?(b["typed"] as? String)
+    }
     func sleep() {
         guard shown else { return }
+        if typing { typeClose(); onTyped?(nil) }
         shown = false; run("jarvis.sleep()"); hideGen += 1; let g = hideGen
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) { [weak self] in   // after the sign-off animation
             guard let self, g == hideGen, !shown else { return }; panel?.orderOut(nil)
@@ -2776,7 +2798,12 @@ final class App: NSObject, WKScriptMessageHandler {
         guard v.isRunning else { return false }; v.terminate(); return true
     }
     // JARVIS mode: the voice starts on the reply's first finished sentence ("♪" lines) and the rest follows as it is written.
-    lazy var face = JarvisFace()
+    lazy var face: JarvisFace = { let f = JarvisFace(); f.onTyped = { [weak self] text in self?.answerTyped(text) }; return f }()
+    var typeFile = ""   // the type-in console waits: atticus.py --type reads what he typed from this file
+    func answerTyped(_ text: String?) {   // "" means cancelled
+        guard !typeFile.isEmpty else { return }
+        try? (text ?? "").write(toFile: typeFile, atomically: true, encoding: .utf8); typeFile = ""
+    }
     var jarvisStepAt = Date.distantPast, kokoroCheckedAt = Date(), micLevel = 0.0, jarvisVoiceLevel = 0.0, jarvisVoiceAt = Date.distantPast, jarvisActiveAt = Date.distantPast, faceState = "", jarvisApproval = false
     func jarvisTick() {   // 30 times a second: wake or sleep the face, and give it the state and the voice's loudness
         let on = Prefs.bool("jarvis")
@@ -2987,6 +3014,7 @@ final class App: NSObject, WKScriptMessageHandler {
     }
     func jarvisEndLive() { try? jarvisLiveIn?.close(); jarvisLiveIn = nil; jarvisLive = nil; jarvisVoiced = "" }   // the voice finishes what it has, then exits
     func deliver(_ a: String, aloud: Bool = true) {   // Settings: read answers aloud, copy them
+        jarvisAsked = Prefs.bool("jarvis") && a.trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix("?")
         if Prefs.bool("autoCopy") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(a, forType: .string) }
         if let live = jarvisLive, voice === live, live.isRunning {   // JARVIS already started this reply: speak only what is left
             let said = jarvisVoiced.split(whereSeparator: \.isWhitespace).joined(separator: " "), all = a.split(whereSeparator: \.isWhitespace).joined(separator: " ")
@@ -3509,6 +3537,7 @@ final class App: NSObject, WKScriptMessageHandler {
     // Esc: stop listening, stop the answer, or close the box.
     // One layer per press: the user's mark, voice, listening, a card, the answer, then the drawing, then the box.
     func escape() {
+        if face.typing { face.typeClose(); answerTyped(nil); return }   // Esc closes only the type-in console; the task goes on
         if handsFree { close(clear: false); return }
         if drawing.hasInput { drawing.clearInput(); return }
         if shush() { return }
@@ -3542,6 +3571,7 @@ final class App: NSObject, WKScriptMessageHandler {
         cancelFast()
         aheadItem?.cancel(); dropAhead()
         if picking { js("pickHear") }
+        if !typeFile.isEmpty { face.typeClose(); typeFile = "" }   // the ask is cancelled: fold the console away
         proc?.terminate(); proc = nil; askFile = ""; agentMoveFile = ""; replacement = nil; retryOffer = false
         if let old = offerText { text = old }; offerText = nil
         let an = analyzer, next = nextAnalyzer
@@ -3968,7 +3998,8 @@ final class App: NSObject, WKScriptMessageHandler {
     }
     // JARVIS mode: how long a pause ends what he's saying. A sentence that stops on "just", "the", "and", "could you"
     // is a pause to think, not the end ("Could you please just" was sent on its own): wait 3 s for those, 1.5 s otherwise.
-    func endPause() -> Double { Prefs.bool("jarvis") ? (Self.soundsUnfinished(text) ? 3.0 : 1.5) : 1.3 }
+    func endPause() -> Double { Prefs.bool("jarvis") ? (Self.soundsUnfinished(text) ? 3.0 : jarvisAsked ? 2.5 : 1.5) : 1.3 }
+    var jarvisAsked = false   // JARVIS's last reply was a question ("What should it say?"): he may dictate with pauses, so wait 2.5 s
     static func soundsUnfinished(_ text: String) -> Bool {
         let words = text.lowercased().replacingOccurrences(of: "\u{2019}", with: "'").components(separatedBy: CharacterSet.letters.union(CharacterSet(charactersIn: "'")).inverted).filter { !$0.isEmpty }
         guard let last = words.last else { return false }
@@ -4120,7 +4151,13 @@ final class App: NSObject, WKScriptMessageHandler {
             stops += 1; listenID += 1; pause?.cancel()
             if confirmed || dictating && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { dictating ? finishDictation() : finishOrSignOff() }
             else {
-                if let old = offerText { let partial = text; text = old; offerText = nil; busy = proc?.isRunning == true; picking ? js("pickHear") : js("draft", partial); return }   // a drawing reply has no worker; a card's keeps waiting
+                if let old = offerText {
+                    let partial = text
+                    if Prefs.bool("jarvis"), !drawingReply, !partial.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return finishOrSignOff() }   // JARVIS: answer with what he heard rather than wait in silence (08/11 freeze)
+                    text = old; offerText = nil; busy = proc?.isRunning == true; picking ? js("pickHear") : js("draft", partial)   // a drawing reply has no worker; a card's keeps waiting
+                    if Prefs.bool("jarvis"), picking || jarvisApproval { jarvisSpeakLive("Sorry, sir, say that again?"); jarvisEndLive(); jarvisCardListen() }   // nothing heard: ask again aloud and listen
+                    return
+                }
                 if dictating { hush(); cue("soundStop"); return hide(after: 0.2) }
                 if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { hush(); js("msg", ""); return hide(after: 0.2) }   // nothing to review
                 review("Couldn’t confirm your words. Check them and press Return.")
@@ -4573,6 +4610,15 @@ final class App: NSObject, WKScriptMessageHandler {
                         else if p.count == 3, Prefs.d[p[1]] is String, !p[1].hasPrefix("hotkey") { Atticus.settings.apply(p[1], p[2]); Atticus.settings.push() }   // a choice setting ("workIn front")
                         continue
                     }
+                    if line.hasPrefix("⌨ "), let j = try? JSONSerialization.jsonObject(with: Data(line.dropFirst(2).utf8)) as? [String: Any], let a = j["a"] as? String {   // JARVIS needs exact text: the type-in console
+                        DispatchQueue.main.async { [weak self] in
+                            guard let self else { return }
+                            self.answerTyped(nil); self.typeFile = a
+                            guard Prefs.bool("jarvis"), let data = try? JSONSerialization.data(withJSONObject: ["label": j["label"] ?? "", "kind": j["kind"] ?? "text", "people": j["people"] ?? []]) else { return self.answerTyped(nil) }
+                            self.face.type(String(decoding: data, as: UTF8.self))
+                        }
+                        continue
+                    }
                     if line.hasPrefix("◇ "), let j = try? JSONSerialization.jsonObject(with: Data(line.dropFirst(2).utf8)) as? [String: Any] {   // "which one?": the choices card
                         DispatchQueue.main.async { [weak self] in self?.jarvisAskCard(j["q"] as? String ?? "") }   // after the card is up
                         self.retryOffer = true; self.askNeed = ["pick": true]; self.askFile = j["a"] as? String ?? ""; self.show(); self.js("pick", j); continue
@@ -4604,7 +4650,11 @@ final class App: NSObject, WKScriptMessageHandler {
                         self.mini.finish(); self.answer = "✓ " + (guided ? finish : result); self.js("line", self.answer)
                         self.deliver(guided ? finish : result, aloud: !guided); continue   // after the line: finding the read-aloud voice must not delay the answer; a guide's steps speak for themselves
                     }
-                    if line.hasPrefix("▸ "), Prefs.bool("jarvis") { self.jarvisStepAt = Date(); self.face.run("jarvis.step()") }   // the face pulses on each task step
+                    if line.hasPrefix("▸ "), Prefs.bool("jarvis") {   // the face pulses on each task step and shows it as a card
+                        self.jarvisStepAt = Date()
+                        let text = (try? JSONSerialization.data(withJSONObject: String(line.dropFirst(2)), options: .fragmentsAllowed)).map { String(decoding: $0, as: UTF8.self) } ?? "''"
+                        self.face.run("jarvis.step(\(text))")
+                    }
                     if line.hasPrefix("♪ ") { self.jarvisSpeakLive(String(line.dropFirst(2))); continue }
                     if line == "⏻" { if Prefs.bool("jarvis") { self.handsFree = false; self.followUp = false }; continue }   // JARVIS heard a sign-off: no listening after this reply
                     if line.hasPrefix("! ") { self.js("msg", String(line.dropFirst(2))) }

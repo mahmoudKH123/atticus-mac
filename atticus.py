@@ -602,7 +602,7 @@ RISKY = [('Delete something?', r'\b(rm|rmdir|srm|unlink|shred|trash|mv)\s|\bdele
 RISKY_LABEL = r"(?i)\b(buy|purchase|pay|payment|checkout|order|send|delete|remove|trash|submit|publish|post|sign.?out|log.?out|unsubscribe|subscribe|transfer|bid|erase|withdraw|donate|authorize|grant access|allow access|logout|book|reserve|merge|deploy|discard|wipe|format|apply(?! filters| changes| settings| coupon| code| promo| discount| theme| style| formatting)|confirm)\b"
 RUNS = ('.command', '.tool', '.terminal', '.sh', '.zsh', '.bash', '.app', '.workflow', '.action')   # macOS runs these when opened
 APP_DIRS = ('/Applications/', '/System/Applications/', os.path.join(HOME, 'Applications') + '/')
-QUIET = (DRAW, SEARCH, READ, LOOK, FRONT, SHOW, PLACE, PLAY, QUEUE, TYPE, REMEMBER, FORGET, ABOUT, PICK, SET, WEB, HISTORY, HANDS, WINDOW, f'{shlex.quote(ME)} --calendar ', f'{shlex.quote(ME)} --reminders ', f'{shlex.quote(ME)} --mac ', f'{shlex.quote(ME)} --timer ', f'{shlex.quote(ME)} --mail ', f'{shlex.quote(ME)} --shop ', f'{shlex.quote(ME)} --whatsapp ', f'{shlex.quote(ME)} --typein ', 'open ', 'mdfind ', 'pbpaste')   # helpers confirm their own risky actions
+QUIET = (DRAW, SEARCH, READ, LOOK, FRONT, SHOW, PLACE, PLAY, QUEUE, TYPE, REMEMBER, FORGET, ABOUT, PICK, SET, WEB, HISTORY, HANDS, WINDOW, f'{shlex.quote(ME)} --calendar ', f'{shlex.quote(ME)} --reminders ', f'{shlex.quote(ME)} --mac ', f'{shlex.quote(ME)} --timer ', f'{shlex.quote(ME)} --mail ', f'{shlex.quote(ME)} --shop ', f'{shlex.quote(ME)} --whatsapp ', f'{shlex.quote(ME)} --typein ', f'{shlex.quote(ME)} --heard ', f'{shlex.quote(ME)} --compose ', 'open ', 'mdfind ', 'pbpaste')   # helpers confirm their own risky actions
 
 
 def launches_program(part):
@@ -1729,6 +1729,7 @@ def plain(text):
 SKILLS = os.path.join(DIR, 'skills.json')
 DEICTIC = re.compile(r'\b(this|that|these|those|it|here|there|them|him|her)\b')   # "close this" depends on the moment: never learned
 INTERNAL_TASK_MARKERS = ('\nAlready completed:', '\nRemaining words:')
+JARVIS_ECHO = re.compile(r'\bsir\b', re.I)   # only JARVIS says it: never learned as one of his tasks
 
 
 # shortcut: a deny list, not proof of safety; shortcuts only ever come from the user's own ask
@@ -1768,7 +1769,9 @@ def skills():
     try:
         with open(SKILLS) as f: saved = json.load(f)
         if not isinstance(saved, dict): return {}
+        echo = pref('jarvis', False)   # JARVIS mode: a task with "sir" in it was JARVIS's own voice heard back, not his ask
         clean = {task: entry for task, entry in saved.items() if not any(marker.casefold() in task.casefold() for marker in INTERNAL_TASK_MARKERS)
+                 and not (echo and not entry.get('mine') and JARVIS_ECHO.search(task))
                  and isinstance(entry, dict) and isinstance(entry.get('reply'), str) and isinstance(entry.get('cmds'), list) and all(isinstance(c, str) for c in entry['cmds'])}
         pruned = len(clean) != len(saved)
         saved = clean
@@ -1882,6 +1885,7 @@ def learn(task, cmds, reply, asked=''):
     """Save the commands if every one is a replayable action (no reading, searching, clicking by element ID).
     asked: the words that asked for it when task is a shortcut's name, so "when I say study, open Notes" replays Notes in front."""
     k = plain(task)
+    if pref('jarvis', False) and JARVIS_ECHO.search(k): return
     if any(x in c for c in cmds for x in (FORGET, SHORTCUT)):   # changing rules or shortcuts is not itself a shortcut
         return
     # looking around (screen, menus, web, saving a rule) is how the AI found the way; the replay needs only the actions
@@ -5402,7 +5406,7 @@ def agents_service():
     finally: manager.close()
 
 
-JARVIS_TOOLS = f"\nReminders (any language): {shlex.quote(ME)} --reminders --help for JSON list/add/edit/complete/delete; always use it, never AppleScript.\nMac controls: {shlex.quote(ME)} --mac --help (volume, mute, brightness, dark mode, Wi-Fi, Bluetooth, airplane mode, Do Not Disturb, screenshot, lock, screen off, status); use it for these.\nTimers and alarms: {shlex.quote(ME)} --timer --help; use it, never sleep or AppleScript.\nOther Mac settings: open x-apple.systempreferences:<page id>, then {HANDS}; every change there asks him first. Security and privacy pages, sudo and security commands are blocked: open the page and let him change it.\nEmail (his personal Gmail): {shlex.quote(ME)} --mail '<what he wants, in plain words>'; it reads, searches, summarises and saves drafts, never sends. Do email yourself, here, never as a background agent. To write one: get the whole message first, then always open --typein 'Email address' email for the recipient and use exactly what he types, then save the draft with --mail. Say its answer in your own short words; he sends drafts himself.\nOrders and deliveries (any shop): {shlex.quote(ME)} --orders gives his current orders from Gmail; answer from it in a sentence or two.\nLanguage: he may speak Egyptian Arabic or mix it with English, in Arabic script or transliterated (\"eftah Spotify\", \"fakkarni bokra\"); understand it and always answer in English. Speech recognition may write English words in Arabic letters (\"سبوتيفاي\" = Spotify).\nWhatsApp: {shlex.quote(ME)} --whatsapp '<name>' '<message>' (people in his contacts only). Tidy what he said into a short, casual message in his own voice and in the language he used (\"tell Ahmed I'm running late\" -> \"Running a bit late, sorry!\"). It opens the chat with the text typed; he presses send. Never claim it was sent; say it's ready for him to send.\nTyping: when you need something exact (an email address, phone number, URL, spelling of a name, a code or reference) and he hasn't spelled it clearly, or he says 'let me type it', run {shlex.quote(ME)} --typein '<short label, e.g. Email address>' [email|phone|url|text] after one short spoken line ('Type the address, sir.'); it waits while he types (his contacts are suggested) and prints exactly what he typed. Use that text exactly. Never for passwords, PINs or codes sent to him.\nShopping: one step, no browsing: {shlex.quote(ME)} --shop '<short search phrase>' [shops] [--cheapest when he wants the cheapest]. Shops: the one he names, else the right ones for the item (default amazon noon jumia; add 2b for electronics, ikea for furniture and home, carrefour for groceries; aliexpress or temu only if he says cheap or from abroad). Then a few words ('Amazon, Noon and Jumia are up, sir.') and stop: he takes it from there. Never read options, add to cart or check out unless he asks; never type card numbers or passwords; the final buy button is always his."
+JARVIS_TOOLS = f"\nReminders (any language): {shlex.quote(ME)} --reminders --help for JSON list/add/edit/complete/delete; always use it, never AppleScript.\nMac controls: {shlex.quote(ME)} --mac --help (volume, mute, brightness, dark mode, Wi-Fi, Bluetooth, airplane mode, Do Not Disturb, screenshot, lock, screen off, status); use it for these.\nTimers and alarms: {shlex.quote(ME)} --timer --help; use it, never sleep or AppleScript.\nOther Mac settings: open x-apple.systempreferences:<page id>, then {HANDS}; every change there asks him first. Security and privacy pages, sudo and security commands are blocked: open the page and let him change it.\nEmail (his personal Gmail): {shlex.quote(ME)} --mail '<what he wants, in plain words>'; it reads, searches, summarises and saves drafts, never sends. Do email yourself, here, never as a background agent. To write one: {shlex.quote(ME)} --compose '{{\"to\":[\"<address or contact name>\"],\"cc\":[],\"bcc\":[],\"subject\":\"...\",\"body\":\"...\",\"files\":[\"<full path>\"]}}' after one short line ('Here it is, sir.'). Write the subject and body yourself from what he said, in his voice; find files with mdfind or ls first. It shows every field on a card; he edits it by typing or voice and presses Send himself (only his click sends; you never can). Unknown address: put the contact name, the card suggests his contacts. When --compose says Sent, it really went out from his Gmail by his own click: say so plainly and never doubt it later. Use --mail only when he asks for a draft.\nOrders and deliveries (any shop): {shlex.quote(ME)} --orders gives his current orders from Gmail; answer from it in a sentence or two.\nLanguage: he may speak Egyptian Arabic or mix it with English, in Arabic script or transliterated (\"eftah Spotify\", \"fakkarni bokra\"); understand it and always answer in English. Speech recognition may write English words in Arabic letters (\"سبوتيفاي\" = Spotify).\nWhatsApp: {shlex.quote(ME)} --whatsapp '<name>' '<message>' (people in his contacts only). Tidy what he said into a short, casual message in his own voice and in the language he used (\"tell Ahmed I'm running late\" -> \"Running a bit late, sorry!\"). It opens the chat with the text typed; he presses send. Never claim it was sent; say it's ready for him to send.\nTyping: when you need something exact (an email address, phone number, URL, spelling of a name, a code or reference) and he hasn't spelled it clearly, or he says 'let me type it', run {shlex.quote(ME)} --typein '<short label, e.g. Email address>' [email|phone|url|text] after one short spoken line ('Type the address, sir.'); it waits while he types (his contacts are suggested) and prints exactly what he typed. Use that text exactly. Never for passwords, PINs or codes sent to him.\nHearing: when he corrects a word you misheard ('no, I said email', 'I meant Westcon'), run {shlex.quote(ME)} --heard '<every wrong word, copied exactly from his earlier ask (\"tracked her\", not \"tracked\")>' '<what he meant>', then do what he meant. Only for real mishearings, never for a change of mind. 'What have you learned' about hearing: --heard --list; 'forget that': --heard --forget '<words>'.\nShopping: one step, no browsing: {shlex.quote(ME)} --shop '<short search phrase>' [shops] [--cheapest when he wants the cheapest]. Shops: the one he names, else the right ones for the item (default amazon noon jumia; add 2b for electronics, ikea for furniture and home, carrefour for groceries; aliexpress or temu only if he says cheap or from abroad). Then a few words ('Amazon, Noon and Jumia are up, sir.') and stop: he takes it from there. Never read options, add to cart or check out unless he asks; never type card numbers or passwords; the final buy button is always his."
 
 JARVIS = """
 JARVIS mode (overrides your name, reply length and tone above): you're Jarvis, his own AI, running his Mac and his day. Talk like a quick-witted British right hand: composed, dry, understated, warm, a bit cheeky. Polished, never stiff or scripted.
@@ -5541,6 +5545,10 @@ def relay(p=None, directory=None):
                     print(('▥ ' if j.get('view') else '▤ ') + ident, flush=True)
                 Path(a + '.tmp').write_text('ok')
                 os.rename(a + '.tmp', a)
+            elif 'compose' in j and os.environ.get('ATTICUS_UI') == '1':   # "✉ {json}": JARVIS's compose card
+                print('✉ ' + json.dumps({'draft': j['compose'], 'people': j.get('people', []), 'a': a}, ensure_ascii=False), flush=True)
+            elif 'compose' in j:   # no app to show it in
+                Path(a + '.tmp').write_text('noapp'); os.rename(a + '.tmp', a)
             elif 'type' in j and os.environ.get('ATTICUS_UI') == '1':   # "⌨ {json}": JARVIS's type-in console
                 print('⌨ ' + json.dumps({'label': j['type'], 'kind': j.get('kind', 'text'), 'people': j.get('people', []), 'a': a}, ensure_ascii=False), flush=True)
             elif 'type' in j:   # no app: a plain dialog
@@ -7148,7 +7156,48 @@ def jarvis_heard(text):
     """Nearest command or name for words speech recognition often mishears; anything else is left as said."""
     for pattern, fix in JARVIS_HEARD:
         text = re.sub(pattern, fix, text, flags=re.I)
+    for wrong, row in sorted(heard_rows().items(), key=lambda r: -len(r[0])):   # what he corrected himself, longest first
+        text = re.sub(r'(?<!\w)' + re.escape(wrong) + r'(?!\w)', row['meant'].replace('\\', r'\\'), text, flags=re.I)
     return text
+
+
+# JARVIS mode learns his hearing: when he corrects a word ("no, I said email"), JARVIS saves what speech recognition wrote and what he
+# meant; jarvis_heard puts it right from then on and the app gives the meant words to Whisper as hints. Notes only, never code.
+HEARD = os.path.join(DIR, 'heard.json')
+HEARD_MAX = 200
+HEARD_COMMON = {'a', 'an', 'the', 'i', 'it', 'is', 'to', 'of', 'and', 'or', 'in', 'on', 'at', 'my', 'me', 'you', 'yes', 'no', 'ok', 'okay', 'not', 'that', 'this'}
+
+def heard_rows():
+    try:
+        with open(HEARD) as f: rows = json.load(f)
+    except (OSError, ValueError): return {}
+    return {k: v for k, v in rows.items() if isinstance(k, str) and isinstance(v, dict) and isinstance(v.get('meant'), str)} if isinstance(rows, dict) else {}
+
+def heard_tool(args):
+    """--heard '<what it wrote>' '<what he meant>' | --heard --list | --heard --forget '<either>'."""
+    rows = heard_rows()
+    if args[:1] == ['--list']:
+        return '\n'.join(f'"{k}" -> "{v["meant"]}"' for k, v in reversed(rows.items())) or 'Nothing learned about his hearing yet.'
+    if args[:1] == ['--forget']:
+        w = ' '.join(args[1:]).strip().lower()
+        gone = [k for k, v in rows.items() if w and w in (k, v['meant'].lower())]
+        for k in gone: rows.pop(k)
+    else:
+        if len(args) != 2: return "Usage: --heard '<what speech recognition wrote>' '<what he meant>' | --list | --forget '<words>'"
+        wrong, meant = ' '.join(re.findall(r"[\w'-]+", args[0].lower())), args[1].strip()
+        if not (2 < len(wrong) <= 60 and 0 < len(meant) <= 60 and len(wrong.split()) <= 6 and len(meant.split()) <= 6):
+            return 'Not saved: keep both to a few words, only the part that was misheard.'
+        if wrong == ' '.join(re.findall(r"[\w'-]+", meant.lower())) or wrong in HEARD_COMMON: return 'Not saved: nothing to correct there.'
+        if TYPE_SECRET.search(wrong + ' ' + meant): return 'Not saved: never keep passwords, codes or other secrets.'
+        n = rows.pop(wrong, {}).get('n', 0) + 1   # a re-correction moves to the end: the file stays oldest first
+        rows[wrong] = {'meant': meant, 'at': time.strftime('%Y-%m-%d %H:%M:%S'), 'n': n}
+        rows = dict(list(rows.items())[-HEARD_MAX:])
+        gone = None
+    os.makedirs(DIR, mode=0o700, exist_ok=True)
+    with tempfile.NamedTemporaryFile(mode='w', dir=DIR, delete=False) as f:
+        json.dump(rows, f, indent=1, ensure_ascii=False); f.flush(); os.replace(f.name, HEARD)
+    if gone is None: return f'Saved: "{wrong}" now means "{meant}". Say "Noted, sir." in a few words and carry on with what he meant.'
+    return f'Forgot {len(gone)}.' if gone else 'Nothing like that was saved.'
 
 # JARVIS mode shops up to the checkout page and stops: the button that completes a purchase is always his to press, even after a spoken yes.
 JARVIS_BUY = (r"(?i)\b(?:place (?:your |the |my )?order|buy now|buy with 1-click|1-click|pay|complete (?:your |the )?(?:purchase|order|payment)|"
@@ -7257,10 +7306,50 @@ def jarvis_buy_click(labels):
     return any(re.search(JARVIS_BUY, str(label or '')) for label in labels)
 
 
+# JARVIS mode compose card: the whole email (To, CC, BCC, subject, body, files) on a card beside the globe. He edits it by typing or by
+# voice and sends it with his own click or key on the card (the app sends it through Apple Mail). Nothing here, and no AI tool, can send.
+COMPOSE_LIST, COMPOSE_FILES, COMPOSE_MB = 20, 10, 25
+def compose_draft(d):
+    """The card's draft from the AI's JSON, cleaned; (draft, problems)."""
+    if not isinstance(d, dict): return None, ['Pass the draft as one JSON object.']
+    people = lambda k: [str(x).strip()[:120] for x in (d.get(k) or []) if str(x).strip()][:COMPOSE_LIST] if isinstance(d.get(k) or [], list) else [str(d.get(k)).strip()[:120]]
+    out, problems, total = {'kind': 'email', 'to': people('to'), 'cc': people('cc'), 'bcc': people('bcc'),
+                            'subject': str(d.get('subject') or '')[:300], 'body': str(d.get('body') or '')[:20000], 'files': []}, [], 0
+    for f in (d.get('files') or [])[:COMPOSE_FILES]:
+        path = os.path.abspath(os.path.expanduser(str(f)))
+        if not os.path.isfile(path): problems.append(f'No such file: {f}'); continue
+        size = os.path.getsize(path); total += size
+        out['files'].append({'path': path, 'name': os.path.basename(path), 'size': size})
+    if total > COMPOSE_MB * 1024 * 1024: problems.append(f'Files add up to {total // 1048576} MB; Gmail takes {COMPOSE_MB} MB.')
+    if (d.get('kind') or 'email') != 'email': problems.append('Only email for now.')
+    return out, problems
+
+def compose_tool(args):
+    """--compose '<json draft>' shows the card and waits; --compose --wait keeps waiting on the open card."""
+    if not os.environ.get('ATTICUS_ASK'): return 'The card needs the app.'
+    if args[:1] == ['--wait']: draft = None
+    else:
+        try: draft, problems = compose_draft(json.loads(' '.join(args)))
+        except ValueError: draft, problems = None, ['Not valid JSON.']
+        if draft is None or any(p.startswith(('Not valid', 'Pass', 'Only')) for p in problems): return 'Not shown: ' + ' '.join(problems)
+    s = ask_user({'compose': draft, 'people': type_people() if draft is not None else []}, 115)
+    s = (s or '').strip()
+    if not s: return 'The card is still open and he is still on it. Say nothing; run --compose --wait to keep waiting.'
+    if s == 'sent': return 'Sent from his Gmail through Apple Mail, by his own click. Confirm in a few words.'
+    if s == 'cancel': return 'He closed the card; nothing was sent. Say so in a few words.'
+    if s.startswith('say:'):
+        return (f'While the card was open he said: "{s[4:].strip()[:400]}". If it changes the email, run --compose again with the WHOLE updated draft '
+                '(his typed edits are in the card file below). If he says send it, tell him to press Send on the card; you cannot send. '
+                'If it is about something else, close nothing and answer it.\n' + (open(COMPOSE_NOW).read() if os.path.exists(COMPOSE_NOW) else ''))
+    if s == 'noapp': return 'The card needs the app.'
+    return s[:300]
+COMPOSE_NOW = os.path.join(DIR, 'compose-now.json')   # the app writes the card's current fields here when he speaks, so voice edits keep his typing
+
+
 # JARVIS mode never sends anything for him: no email, message, reply, forward, post or invite from any connector, in the chat or a background
 # agent. Email goes through --mail, which only saves drafts; he sends them himself.
 JARVIS_SEND = re.compile(r'^mcp__.+__(?:\w*_)?(?:send|reply|forward|post|publish|invite|share|respond)(?:_\w*)?$', re.I)
-JARVIS_SEND_STOP = (f'Blocked: JARVIS never sends anything for him. For email use {shlex.quote(ME)} --mail to save a draft, then tell him it is in '
+JARVIS_SEND_STOP = (f'Blocked: JARVIS never sends anything for him. For email open the card with {shlex.quote(ME)} --compose (he presses Send), or --mail to save a draft and tell him it is in '
                     'Drafts for him to send. Do not try another way.')
 def jarvis_send_tool(name):
     return bool(JARVIS_SEND.search(name or ''))
@@ -8531,6 +8620,10 @@ def main():
         return print(whatsapp_tool(args[1:]))
     if args[:1] == ['--typein']:
         return print(type_tool(args[1:]))
+    if args[:1] == ['--heard']:
+        return print(heard_tool(args[1:]))
+    if args[:1] == ['--compose']:
+        return print(compose_tool(args[1:]))
     if args[:1] == ['--shop']:
         return print(shop_tool(args[1:]))
     if args[:1] == ['--orders']:

@@ -59,7 +59,7 @@ class JarvisTests(unittest.TestCase):
 
     def test_hands_free_stays_on_until_sign_off_or_30s_silence_only_in_jarvis_mode(self):
         source = open(os.path.join(os.path.dirname(__file__), '..', 'Atticus.swift')).read()
-        self.assertIn('held > (quietFollowUp && Prefs.bool("jarvis") ? 30 : handsFree && picking && Prefs.bool("jarvis") ? 50 : 8)', source)   # 30 s of silence ends the chat; a card still waits 50 s
+        self.assertIn('held > (quietFollowUp && Prefs.bool("jarvis") ? 30 : handsFree && (picking || jarvisCompose) && Prefs.bool("jarvis") ? 50 : 8)', source)   # 30 s of silence ends the chat; a card still waits 50 s
         self.assertIn('if quietFollowUp && Prefs.bool("jarvis") { hush(); cue("soundStop"); close(clear: false); return }; if quietFollowUp { hush(); fadeIdleHandsFree(); return }; if offerText != nil { stopOfferInput(); jarvisCardListen(); return };', source)   # a quiet exit, no words
         self.assertIn('if handsFree, offerText == nil, Prefs.bool("jarvis"), Self.endsJarvisChat(text) { cue("soundStop"); close(clear: false); return }', source)
         self.assertIn("if handsFree { close(clear: false); return }", source)                           # Esc still ends it
@@ -301,7 +301,7 @@ class JarvisTests(unittest.TestCase):
     def test_choices_card_is_asked_aloud_and_answered_by_voice_in_jarvis_hands_free(self):
         app = open(os.path.join(os.path.dirname(__file__), '..', 'Atticus.swift')).read()
         self.assertIn('DispatchQueue.main.async { [weak self] in self?.jarvisAskCard(j["q"] as? String ?? "") }', app)
-        self.assertIn('guard Prefs.bool("jarvis"), picking || jarvisApproval && retryOffer && !askFile.isEmpty, !engine.isRunning else { return }', app)   # JARVIS mode only: a choices card or a spoken approval
+        self.assertIn('guard Prefs.bool("jarvis"), picking || jarvisApproval && retryOffer && !askFile.isEmpty || jarvisCompose, !engine.isRunning else { return }', app)   # JARVIS mode only: a choices card or a spoken approval
 
 
     def test_ai_sign_off_ends_hands_free_chat_only_in_jarvis_mode(self):
@@ -329,7 +329,7 @@ class JarvisTests(unittest.TestCase):
         quiet = app[app.index('    func quietStop() {'):app.index('    func heard(')]
         self.assertIn('guard Prefs.bool("jarvis"), quietFor < pause else { return stop() }', quiet)   # upstream: stops at once, as before
         self.assertIn('self?.micLevel = v; self?.noteVoice(v)', app)
-        self.assertIn('if Prefs.bool("jarvis") { all.append(contentsOf: Self.jarvisWords) }', app)
+        self.assertIn('            all.append(contentsOf: Self.jarvisWords)\n        }', app)
         self.assertIn('"GitHub Desktop"', app)
 
 
@@ -542,10 +542,76 @@ class JarvisResponsivenessTests(unittest.TestCase):
                  'what time is west gone onboarding': 'what time is Westcon onboarding', 'email com store': 'email Comstor',
                  'open as your devops': 'open Azure devops', 'study a z 400': 'study AZ-400', 'weather in knew cairo': 'weather in New Cairo',
                  'dinner in mardy at 8': 'dinner in Maadi at 8', 'drive to she ik zayed': 'drive to Sheikh Zayed', 'traffic to tagamo': 'traffic to Tagamoa'}
-        for said, meant in cases.items():
-            self.assertEqual(atticus.jarvis_heard(said), meant, said)
-        for left in ('a major update is out', 'same as 400 people', 'Marty called', 'any meals planned', 'remind her to call me'):
-            self.assertEqual(atticus.jarvis_heard(left), left)
+        with patch.object(atticus, 'HEARD', '/nonexistent/heard.json'):   # the fixed table alone, not what this Mac has learned
+            for said, meant in cases.items():
+                self.assertEqual(atticus.jarvis_heard(said), meant, said)
+            for left in ('a major update is out', 'same as 400 people', 'Marty called', 'any meals planned', 'remind her to call me'):
+                self.assertEqual(atticus.jarvis_heard(left), left)
+
+    def test_learns_his_hearing_corrections(self):
+        import tempfile
+        d = tempfile.mkdtemp()
+        with patch.object(atticus, 'DIR', d), patch.object(atticus, 'HEARD', os.path.join(d, 'heard.json')):
+            self.assertIn('Nothing learned', atticus.heard_tool(['--list']))
+            self.assertIn('Saved', atticus.heard_tool(['Mohammed Kashana', 'Mohamed Khashana']))
+            self.assertIn('Saved', atticus.heard_tool(['tracked her', 'Tractor']))
+            self.assertEqual(atticus.jarvis_heard('email mohammed kashana about the tracked her'), 'email Mohamed Khashana about the Tractor')
+            self.assertEqual(atticus.jarvis_heard('untracked hers stay'), 'untracked hers stay')   # whole words only
+            for bad in (['the', 'a'], ['same', 'same'], ['my pass code', '1234'], ['one two three four five six seven', 'x'], ['only one']):
+                self.assertIn('Not saved' if len(bad) == 2 else 'Usage', atticus.heard_tool(bad))
+            self.assertEqual(atticus.heard_tool(['--list']).splitlines()[0], '"tracked her" -> "Tractor"')
+            self.assertEqual(atticus.heard_tool(['--forget', 'Tractor']), 'Forgot 1.')
+            self.assertEqual(atticus.jarvis_heard('the tracked her'), 'the tracked her')
+        self.assertIn("--heard '<every wrong word, copied exactly from his earlier ask", atticus.JARVIS_TOOLS)
+        self.assertIn("f'{shlex.quote(ME)} --heard '", open(atticus.__file__).read())
+        app = self.source()
+        self.assertIn('config + "/heard.json"', app[app.index('var hints: [String]'):][:900])
+
+    def test_room_noise_never_becomes_words_before_his_voice(self):
+        app = self.source()
+        body = app[app.index('    func heard(_ now: String) {'):][:1800]
+        self.assertIn('if Prefs.bool("jarvis"), whisperListen, !dictating, voiceHeardAt < began', body)
+        self.assertLess(body.index('voiceHeardAt < began'), body.index('text = now'))   # before the words can start the end pause or be sent
+
+    def test_compose_card_shows_every_field_and_only_his_click_sends(self):
+        import tempfile
+        d = tempfile.mkdtemp(); f = os.path.join(d, 'report.pdf'); open(f, 'wb').write(b'x' * 2048)
+        draft, problems = atticus.compose_draft({'to': ['Ahmed', 'a@b.co'], 'cc': 'c@d.co', 'subject': 'Hi', 'body': 'Body', 'files': [f, os.path.join(d, 'gone.pdf')]})
+        self.assertEqual((draft['to'], draft['cc'], draft['bcc'], draft['subject']), (['Ahmed', 'a@b.co'], ['c@d.co'], [], 'Hi'))
+        self.assertEqual(draft['files'], [{'path': f, 'name': 'report.pdf', 'size': 2048}])
+        self.assertEqual(problems, [f'No such file: {os.path.join(d, "gone.pdf")}'])
+        self.assertIn('Only email', ' '.join(atticus.compose_draft({'kind': 'sms'})[1]))
+        with patch.dict(os.environ, {'ATTICUS_ASK': d}):
+            for answer, said in (('sent', 'Sent from his Gmail'), ('cancel', 'nothing was sent'), (None, '--compose --wait'), ('say: add Sara to cc', 'add Sara to cc')):
+                with patch.object(atticus, 'ask_user', return_value=answer), patch.object(atticus, 'type_people', return_value=[]):
+                    self.assertIn(said, atticus.compose_tool(['{"to":["a@b.co"]}']))
+            self.assertIn('Not valid JSON', atticus.compose_tool(['{nope']))
+        src = open(atticus.ME).read()
+        self.assertIn("f'{shlex.quote(ME)} --compose '", src)   # opening the card needs no approval; it cannot send
+        self.assertIn("print('✉ ' + json.dumps({'draft': j['compose']", src)
+        app = self.source(); page = open(os.path.join(os.path.dirname(__file__), '..', 'ui', 'jarvis.html')).read()
+        self.assertIn("if (!e || !e.isTrusted || !cc.classList.contains('on') || ccSending) return;", page)   # a script's click never sends
+        self.assertIn('case "send":\n            guard let draft else', app)
+        self.assertEqual(app.count('JarvisMail.send('), 1)   # the card's Send is the only way in
+        self.assertIn('if senderAddr is "" and e ends with "@gmail.com" then set senderAddr to e', app)
+        self.assertIn('retryOffer = true; askNeed = [:]; askFile = a', app)   # his words answer the card, like the choices card
+        self.assertIn('if face.composing { face.composeClose(); answerCompose("cancel"); return }', app)
+
+    def test_reply_after_a_spoken_tool_line_is_not_said_twice(self):
+        app = self.source(); body = app[app.index('    func deliver('):app.index('    func linger(')]
+        self.assertIn('Array(saidW.suffix(k)) == Array(allW.prefix(k))', body)
+        self.assertIn('never doubt it later', atticus.JARVIS_TOOLS)
+
+    def test_never_learns_its_own_echo_as_a_task(self):
+        import tempfile
+        d = tempfile.mkdtemp(); path = os.path.join(d, 'skills.json')
+        entry = {'cmds': ['open https://jumia.com.eg'], 'reply': 'ok', 'at': '2099-01-01'}
+        with open(path, 'w') as f:
+            json.dump({"they are sir though jumia's tab shows no results": entry, 'open my facebook': entry, 'sir mode': {**entry, 'mine': True}}, f)
+        with patch.object(atticus, 'SKILLS', path), patch.object(atticus, 'DIR', d), patch.object(atticus, 'pref', side_effect=lambda k, v: k == 'jarvis' or v):
+            self.assertEqual(sorted(atticus.skills()), ['open my facebook', 'sir mode'])   # shortcuts he made himself stay
+        with patch.object(atticus, 'SKILLS', path), patch.object(atticus, 'pref', side_effect=lambda k, v: v):
+            self.assertEqual(len(atticus.skills()), 2)   # upstream untouched
 
     def test_hears_commands_places_and_varies_wording(self):
         app = self.source()
@@ -736,7 +802,8 @@ class JarvisNeverSendsTests(unittest.TestCase):   # 08/11: background agents sen
     def test_email_stays_here_and_confirms_the_address(self):
         email = next(l for l in atticus.JARVIS_TOOLS.split('\n') if l.startswith('Email'))
         self.assertIn('never as a background agent', email)
-        self.assertIn("always open --typein 'Email address' email for the recipient", email)
+        self.assertIn("--compose '{\"to\"", email)
+        self.assertIn('only his click sends; you never can', email)
 
 
 class JarvisHearingFixTests(unittest.TestCase):

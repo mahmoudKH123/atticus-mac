@@ -759,10 +759,27 @@ AudioRecovery.start()
 // Starts the Kokoro voice service in the background (no-op if it's running or not installed).
 // JARVIS mode: the full-screen face, on the Lenovo when it's connected, else this Mac's own screen. Transparent,
 // click-through, over the menu bar and Dock. It shows no text: everything is spoken.
+// The face's page, taking dropped files only while the compose card is open (the files become attachments).
+final class JarvisWeb: WKWebView {
+    var onFiles: (([URL]) -> Void)?, onDrag: ((Bool) -> Void)?
+    private func files(_ info: NSDraggingInfo) -> [URL] {
+        (info.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []).filter { !$0.hasDirectoryPath }
+    }
+    override func draggingEntered(_ info: NSDraggingInfo) -> NSDragOperation {
+        guard onFiles != nil, !files(info).isEmpty else { return super.draggingEntered(info) }; onDrag?(true); return .copy
+    }
+    override func draggingUpdated(_ info: NSDraggingInfo) -> NSDragOperation { onFiles != nil && !files(info).isEmpty ? .copy : super.draggingUpdated(info) }
+    override func draggingExited(_ info: NSDraggingInfo?) { onDrag?(false); super.draggingExited(info) }
+    override func performDragOperation(_ info: NSDraggingInfo) -> Bool {
+        guard let on = onFiles, case let urls = files(info), !urls.isEmpty else { return super.performDragOperation(info) }
+        onDrag?(false); on(urls); return true
+    }
+}
 final class JarvisFace: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
-    private var panel: NSPanel?, web: WKWebView?, ready = false, queue: [String] = [], hideGen = 0
-    private(set) var shown = false, typing = false
+    private var panel: NSPanel?, web: JarvisWeb?, ready = false, queue: [String] = [], hideGen = 0
+    private(set) var shown = false, typing = false, composing = false
     var onTyped: ((String?) -> Void)?   // the type-in console: what he typed, or nil when he pressed Esc
+    var onCompose: ((String, [String: Any]?) -> Void)?   // the compose card: "send" with the draft (his click only), "cancel", "attach"
     static func screen() -> NSScreen? {
         let id = { (s: NSScreen) in (s.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0 }
         return NSScreen.screens.first { s in ["legion", "lenovo"].contains { s.localizedName.lowercased().contains($0) } }
@@ -775,7 +792,8 @@ final class JarvisFace: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
         p.level = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue - 1)
         applySharing(p)
         let config = WKWebViewConfiguration(); config.userContentController.add(self, name: "jarvis")
-        let w = WKWebView(frame: .zero, configuration: config); w.setValue(false, forKey: "drawsBackground"); w.navigationDelegate = self
+        let w = JarvisWeb(frame: .zero, configuration: config); w.setValue(false, forKey: "drawsBackground"); w.navigationDelegate = self
+        w.onDrag = { [weak self] on in self?.run("jarvis.composeDrop(\(on))") }
         loadPage(w, "jarvis.html"); p.contentView = w; web = w; panel = p
         return p
     }
@@ -796,19 +814,119 @@ final class JarvisFace: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
     }
     func typeClose() {
         guard typing else { return }
-        typing = false; run("jarvis.typeClose()"); panel?.ignoresMouseEvents = true; panel?.resignKey()
+        typing = false; run("jarvis.typeClose()"); release()
+    }
+    private func release() { if !typing && !composing { panel?.ignoresMouseEvents = true; panel?.resignKey() } }   // click-through again
+    // The compose card: like the console, the face takes the mouse and keyboard while it is open; files dropped on it attach.
+    func compose(_ json: String) {
+        if !shown { wake() }
+        guard let p = panel, let w = web else { return }
+        composing = true; p.ignoresMouseEvents = false; p.makeKey(); p.makeFirstResponder(w); run("jarvis.compose(\(json))")
+        w.onFiles = { [weak self] urls in self?.composeFiles(urls) }
+    }
+    func composeClose() {
+        guard composing else { return }
+        composing = false; web?.onFiles = nil; run("jarvis.composeClose()"); release()
+    }
+    func composeFiles(_ urls: [URL]) {
+        let files = urls.map { u -> [String: Any] in ["path": u.path, "name": u.lastPathComponent, "size": (try? u.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0] }
+        if let data = try? JSONSerialization.data(withJSONObject: files) { run("jarvis.composeFiles(\(String(decoding: data, as: UTF8.self)))") }
+    }
+    func composeError(_ message: String) {
+        if let data = try? JSONSerialization.data(withJSONObject: message, options: .fragmentsAllowed) { run("jarvis.composeError(\(String(decoding: data, as: UTF8.self)))") }
+    }
+    func composeNow(_ done: @escaping (String) -> Void) {   // the card's fields as he left them, typed edits included
+        guard ready, let w = web else { return done("") }
+        w.evaluateJavaScript("jarvis.composeNow()") { r, _ in done(r as? String ?? "") }
     }
     func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
-        guard typing, let b = message.body as? [String: Any], b.keys.contains("typed") else { return }
-        typing = false; panel?.ignoresMouseEvents = true; panel?.resignKey()
+        guard let b = message.body as? [String: Any] else { return }
+        if composing, let what = b["compose"] as? String {
+            if what == "cancel" { composing = false; web?.onFiles = nil; release() }
+            onCompose?(what, b["draft"] as? [String: Any]); return
+        }
+        guard typing, b.keys.contains("typed") else { return }
+        typing = false; release()
         onTyped?(b["typed"] as? String)
     }
     func sleep() {
         guard shown else { return }
         if typing { typeClose(); onTyped?(nil) }
+        if composing { composeClose(); onCompose?("cancel", nil) }
         shown = false; run("jarvis.sleep()"); hideGen += 1; let g = hideGen
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) { [weak self] in   // after the sign-off animation
             guard let self, g == hideGen, !shown else { return }; panel?.orderOut(nil)
+        }
+    }
+}
+// JARVIS compose card: sends the email he pressed Send on through Apple Mail, from his Gmail account when Mail has one.
+// Only composeEvent("send") calls this, and only the card's own trusted click or ⌘↵ produces that event: no AI tool reaches it.
+enum JarvisMail {
+    static let script = """
+    on run argv
+        set {theSubject, theBody, toList, ccList, bccList, fileList} to argv
+        tell application "Mail"
+            set m to make new outgoing message with properties {subject:theSubject, content:theBody, visible:false}
+            set senderAddr to ""
+            repeat with ac in (get every account)
+                if enabled of ac then
+                    set addrs to (get email addresses of ac)
+                    repeat with i from 1 to count of addrs
+                        set e to item i of addrs as string
+                        if senderAddr is "" and e ends with "@gmail.com" then set senderAddr to e
+                    end repeat
+                end if
+            end repeat
+            if senderAddr is not "" then set sender of m to senderAddr
+            tell m
+                repeat with a in paragraphs of toList
+                    if (a as text) is not "" then make new to recipient at end of to recipients with properties {address:(a as text)}
+                end repeat
+                repeat with a in paragraphs of ccList
+                    if (a as text) is not "" then make new cc recipient at end of cc recipients with properties {address:(a as text)}
+                end repeat
+                repeat with a in paragraphs of bccList
+                    if (a as text) is not "" then make new bcc recipient at end of bcc recipients with properties {address:(a as text)}
+                end repeat
+            end tell
+            set n to 0
+            repeat with f in paragraphs of fileList
+                if (f as text) is not "" then
+                    tell content of m to make new attachment with properties {file name:((POSIX file (f as text)) as alias)} at after the last paragraph
+                    set n to n + 1
+                end if
+            end repeat
+            if n > 0 then delay (1 + n * 0.5)
+            if (send m) then return "sent"
+            return "not sent"
+        end tell
+    end run
+    """
+    static func send(_ d: [String: Any], done: @escaping (String?) -> Void) {
+        let list = { (k: String) in (d[k] as? [String] ?? []).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty } }
+        let to = list("to"), cc = list("cc"), bcc = list("bcc")
+        let files = (d["files"] as? [[String: Any]] ?? []).compactMap { $0["path"] as? String }
+        let valid = { (a: String) in a.range(of: #"^[^\s@<>,;]+@[^\s@<>,;]+\.[^\s@<>,;]+$"#, options: .regularExpression) != nil }
+        guard !(to + cc + bcc).isEmpty, (to + cc + bcc).allSatisfy(valid) else { return done("Check the addresses") }
+        if let missing = files.first(where: { !FileManager.default.isReadableFile(atPath: $0) }) { return done("Can't read " + (missing as NSString).lastPathComponent) }
+        let args = [d["subject"] as? String ?? "", d["body"] as? String ?? "", to.joined(separator: "\n"), cc.joined(separator: "\n"), bcc.joined(separator: "\n"), files.joined(separator: "\n")]
+        DispatchQueue.global(qos: .userInitiated).async {
+            let p = Process(), out = Pipe(), err = Pipe()
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript"); p.arguments = ["-e", script] + args; p.standardOutput = out; p.standardError = err
+            var result: String? = "Mail didn't answer"
+            do {
+                try p.run()
+                let killer = DispatchWorkItem { if p.isRunning { p.terminate() } }; DispatchQueue.global().asyncAfter(deadline: .now() + 60, execute: killer)
+                p.waitUntilExit(); killer.cancel()
+                let said = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+                let why = String(decoding: err.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+                if said == "sent" { result = nil }
+                else {
+                    NSLog("JARVIS mail: not sent (%@)", String(why.prefix(200)))   // Mail's error only, no addresses or words
+                    result = why.contains("-1743") || why.contains("Not authorized") ? "Allow Atticus to control Mail in System Settings › Privacy › Automation" : "Mail couldn't send it"
+                }
+            } catch { result = "Couldn't start Mail" }
+            DispatchQueue.main.async { done(result) }
         }
     }
 }
@@ -2488,6 +2606,16 @@ final class App: NSObject, WKScriptMessageHandler {
         stopWake(); wakeRetry = Date().addingTimeInterval(wakeBackoff); wakeBackoff = min(30, wakeBackoff * 2)
     }
     func finishOrSignOff() {   // JARVIS mode: a sign-off ends the hands-free chat instead of being sent
+        if jarvisCompose, let old = offerText {   // words while the compose card is open: a voice edit, kept with what he typed on it
+            let heard = text; text = old; offerText = nil
+            if Self.endsJarvisChat(heard) || heard.trimmingCharacters(in: .whitespacesAndNewlines).count < 2 { return jarvisCardListen() }   // keyboard noise comes back as "Thank you."
+            let file = composeFile; composeFile = ""
+            face.composeNow { [weak self] now in
+                try? now.write(toFile: (Prefs.path as NSString).deletingLastPathComponent + "/compose-now.json", atomically: true, encoding: .utf8)
+                self?.composeFile = file; self?.answerCompose("say: " + heard)
+            }
+            return
+        }
         if handsFree, offerText == nil, Prefs.bool("jarvis"), Self.endsJarvisChat(text) { cue("soundStop"); close(clear: false); return }
         if jarvisApproval, retryOffer, !askFile.isEmpty, let old = offerText {   // the spoken answer to an approval
             let heard = text; text = old; offerText = nil
@@ -2762,7 +2890,11 @@ final class App: NSObject, WKScriptMessageHandler {
         var seen = Set<String>()
         var all = DictationData.words
         all.append("Atticus")
-        if Prefs.bool("jarvis") { all.append(contentsOf: Self.jarvisWords) }
+        if Prefs.bool("jarvis") {   // the words he corrected JARVIS on go first (newest first), then the fixed list
+            let heard = (try? JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: config + "/heard.json")))) as? [String: [String: Any]] ?? [:]
+            all.append(contentsOf: heard.values.sorted { ($0["at"] as? String ?? "") > ($1["at"] as? String ?? "") }.compactMap { $0["meant"] as? String }.prefix(12))
+            all.append(contentsOf: Self.jarvisWords)
+        }
         all.append(profileName(config + "/me.json"))
         all.append(contentsOf: shortcuts.keys.sorted())
         let appDirs = [NSHomeDirectory() + "/Applications", "/Applications", "/System/Applications", "/System/Applications/Utilities"]
@@ -2798,7 +2930,48 @@ final class App: NSObject, WKScriptMessageHandler {
         guard v.isRunning else { return false }; v.terminate(); return true
     }
     // JARVIS mode: the voice starts on the reply's first finished sentence ("♪" lines) and the rest follows as it is written.
-    lazy var face: JarvisFace = { let f = JarvisFace(); f.onTyped = { [weak self] text in self?.answerTyped(text) }; return f }()
+    lazy var face: JarvisFace = {
+        let f = JarvisFace(); f.onTyped = { [weak self] text in self?.answerTyped(text) }
+        f.onCompose = { [weak self] what, draft in self?.composeEvent(what, draft) }; return f
+    }()
+    // JARVIS compose card: atticus.py --compose waits on composeFile for "sent", "cancel" or "say: <his words>" (a voice edit).
+    var composeFile = "", composeSentAt = Date.distantPast
+    var jarvisCompose: Bool { !composeFile.isEmpty && face.composing }
+    func answerCompose(_ s: String) {
+        guard !composeFile.isEmpty else { return }
+        if askFile == composeFile { askFile = ""; retryOffer = false }
+        try? s.write(toFile: composeFile, atomically: true, encoding: .utf8); composeFile = ""
+    }
+    func composeShow(_ j: [String: Any]) {
+        answerCompose("cancel")   // an older wait never hangs
+        guard let a = j["a"] as? String else { return }
+        composeFile = a
+        guard Prefs.bool("jarvis") else { return answerCompose("noapp") }
+        if Date().timeIntervalSince(composeSentAt) < 120, !face.composing { return answerCompose("sent") }   // he already sent it while the AI was busy
+        if j["draft"] is NSNull && !face.composing { return answerCompose("cancel") }   // nothing left to wait on
+        var show: [String: Any] = ["people": j["people"] ?? []]; if !(j["draft"] is NSNull) { show["draft"] = j["draft"] }
+        if !(j["draft"] is NSNull) || !face.composing, let data = try? JSONSerialization.data(withJSONObject: show) { face.compose(String(decoding: data, as: UTF8.self)) }
+        retryOffer = true; askNeed = [:]; askFile = a   // the card-reply path, as the choices card: his next words answer the card
+        jarvisCardListen()
+    }
+    func composeEvent(_ what: String, _ draft: [String: Any]?) {
+        switch what {
+        case "cancel": answerCompose("cancel")
+        case "attach":
+            let op = NSOpenPanel(); op.allowsMultipleSelection = true; op.canChooseDirectories = false; op.canChooseFiles = true
+            op.level = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 1); NSApp.activate(ignoringOtherApps: true)
+            op.begin { [weak self] r in if r == .OK { self?.face.composeFiles(op.urls) } }
+        case "send":
+            guard let draft else { return face.composeError("Nothing to send") }
+            JarvisMail.send(draft) { [weak self] error in
+                guard let self else { return }
+                if let error { return self.face.composeError(error) }
+                self.composeSentAt = Date(); self.face.composeClose(); self.cue("soundDone"); self.answerCompose("sent")
+            }
+        default: break
+        }
+    }
+
     var typeFile = ""   // the type-in console waits: atticus.py --type reads what he typed from this file
     func answerTyped(_ text: String?) {   // "" means cancelled
         guard !typeFile.isEmpty else { return }
@@ -2990,7 +3163,7 @@ final class App: NSObject, WKScriptMessageHandler {
         jarvisCardListen()
     }
     func jarvisCardListen() {   // the card's own mic, once JARVIS has finished speaking so he doesn't hear himself
-        guard Prefs.bool("jarvis"), picking || jarvisApproval && retryOffer && !askFile.isEmpty, !engine.isRunning else { return }
+        guard Prefs.bool("jarvis"), picking || jarvisApproval && retryOffer && !askFile.isEmpty || jarvisCompose, !engine.isRunning else { return }
         if voice?.isRunning == true || Date() < cueEnds { DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in self?.jarvisCardListen() }; return }
         clickMicrophone()
     }
@@ -3018,7 +3191,11 @@ final class App: NSObject, WKScriptMessageHandler {
         if Prefs.bool("autoCopy") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(a, forType: .string) }
         if let live = jarvisLive, voice === live, live.isRunning {   // JARVIS already started this reply: speak only what is left
             let said = jarvisVoiced.split(whereSeparator: \.isWhitespace).joined(separator: " "), all = a.split(whereSeparator: \.isWhitespace).joined(separator: " ")
-            if aloud { jarvisLiveWrite(all.hasPrefix(said) ? String(all.dropFirst(said.count)) : all) }   // a reply that changed after a note is spoken whole
+            // JARVIS mode: what he said before a tool ("Here it is, sir.") is not in the final reply, so match the end of what was voiced
+            // against the start of the reply ("Sent, sir." was spoken twice, 09/11); a reply that changed after a note is spoken whole
+            let saidW = said.split(separator: " "), allW = all.split(separator: " ")
+            let overlap = Prefs.bool("jarvis") ? (0...min(saidW.count, allW.count)).reversed().first { k in k > 0 && (k >= 2 || k == saidW.count) && Array(saidW.suffix(k)) == Array(allW.prefix(k)) } ?? 0 : 0
+            if aloud { jarvisLiveWrite(all.hasPrefix(said) ? String(all.dropFirst(said.count)) : overlap > 0 ? allW.dropFirst(overlap).joined(separator: " ") : all) }
             return jarvisEndLive()
         }
         jarvisEndLive()
@@ -3538,6 +3715,7 @@ final class App: NSObject, WKScriptMessageHandler {
     // One layer per press: the user's mark, voice, listening, a card, the answer, then the drawing, then the box.
     func escape() {
         if face.typing { face.typeClose(); answerTyped(nil); return }   // Esc closes only the type-in console; the task goes on
+        if face.composing { face.composeClose(); answerCompose("cancel"); return }   // and only the compose card
         if handsFree { close(clear: false); return }
         if drawing.hasInput { drawing.clearInput(); return }
         if shush() { return }
@@ -3572,6 +3750,7 @@ final class App: NSObject, WKScriptMessageHandler {
         aheadItem?.cancel(); dropAhead()
         if picking { js("pickHear") }
         if !typeFile.isEmpty { face.typeClose(); typeFile = "" }   // the ask is cancelled: fold the console away
+        if !composeFile.isEmpty || face.composing { face.composeClose(); composeFile = "" }   // and the compose card
         proc?.terminate(); proc = nil; askFile = ""; agentMoveFile = ""; replacement = nil; retryOffer = false
         if let old = offerText { text = old }; offerText = nil
         let an = analyzer, next = nextAnalyzer
@@ -3981,7 +4160,7 @@ final class App: NSObject, WKScriptMessageHandler {
             Timer.scheduledTimer(withTimeInterval: 0.15, repeats: true) { [weak self] t in
                 guard let self, listenID == listeningID, engine.isRunning, !whisperReleasing else { return t.invalidate() }
                 let f = (dictating ? dictateHotkey() : hotkey()).flags, held = Date().timeIntervalSince(began)
-                if clickTalk && text.isEmpty && held > (quietFollowUp && Prefs.bool("jarvis") ? 30 : handsFree && picking && Prefs.bool("jarvis") ? 50 : 8) { t.invalidate(); if quietFollowUp && Prefs.bool("jarvis") { hush(); cue("soundStop"); close(clear: false); return }; if quietFollowUp { hush(); fadeIdleHandsFree(); return }; if offerText != nil { stopOfferInput(); jarvisCardListen(); return }; hush(); js("stopped", ""); return hide(after: 3) }   // nothing said: stop the mic quietly
+                if clickTalk && text.isEmpty && held > (quietFollowUp && Prefs.bool("jarvis") ? 30 : handsFree && (picking || jarvisCompose) && Prefs.bool("jarvis") ? 50 : 8) { t.invalidate(); if quietFollowUp && Prefs.bool("jarvis") { hush(); cue("soundStop"); close(clear: false); return }; if quietFollowUp { hush(); fadeIdleHandsFree(); return }; if offerText != nil { stopOfferInput(); jarvisCardListen(); return }; hush(); js("stopped", ""); return hide(after: 3) }   // nothing said: stop the mic quietly
                 if whisper && clickTalk && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && Date().timeIntervalSince(whisperVoice) >= endPause() { t.invalidate(); return stop() }   // heard() is too late for the 1.3 s pause
                 if whisper { whisperTick(listeningID) }
                 else if dictating && held >= nextSpeechRollover { nextSpeechRollover += 50; rolloverSpeech(listeningID: listeningID) }
@@ -4016,6 +4195,12 @@ final class App: NSObject, WKScriptMessageHandler {
     }
     func heard(_ now: String) {
         guard engine.isRunning || busy else { return }
+        // JARVIS mode: Whisper writes words from room noise ("Thank you." closed the chat 2 s after waking, 09/11); its own no-speech score
+        // stays at 0 for noise, so no words count until the mic has heard a voice in this listen. He then has the usual 30 s to start talking.
+        if Prefs.bool("jarvis"), whisperListen, !dictating, voiceHeardAt < began, !now.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            if text.isEmpty { NSLog("JARVIS ignores words with no voice on the mic (floor %.3f)", micFloor) }   // no words logged
+            return
+        }
         if quietFollowUp {
             guard !now.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
             quietFollowUp = false
@@ -4156,6 +4341,7 @@ final class App: NSObject, WKScriptMessageHandler {
                     if Prefs.bool("jarvis"), !drawingReply, !partial.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return finishOrSignOff() }   // JARVIS: answer with what he heard rather than wait in silence (08/11 freeze)
                     text = old; offerText = nil; busy = proc?.isRunning == true; picking ? js("pickHear") : js("draft", partial)   // a drawing reply has no worker; a card's keeps waiting
                     if Prefs.bool("jarvis"), picking || jarvisApproval { jarvisSpeakLive("Sorry, sir, say that again?"); jarvisEndLive(); jarvisCardListen() }   // nothing heard: ask again aloud and listen
+                    else if jarvisCompose { jarvisCardListen() }   // the compose card stays open and keeps listening quietly
                     return
                 }
                 if dictating { hush(); cue("soundStop"); return hide(after: 0.2) }
@@ -4608,6 +4794,10 @@ final class App: NSObject, WKScriptMessageHandler {
                         let p = line.split(separator: " ").map(String.init)
                         if p.count == 3, Prefs.defaults[p[1]] is Bool, p[1] != "paused", p[1] != "safe" || p[2] == "true" { Atticus.settings.apply(p[1], p[2] == "true"); Atticus.settings.push() }
                         else if p.count == 3, Prefs.d[p[1]] is String, !p[1].hasPrefix("hotkey") { Atticus.settings.apply(p[1], p[2]); Atticus.settings.push() }   // a choice setting ("workIn front")
+                        continue
+                    }
+                    if line.hasPrefix("✉ "), let j = try? JSONSerialization.jsonObject(with: Data(line.dropFirst(2).utf8)) as? [String: Any] {   // JARVIS's compose card
+                        DispatchQueue.main.async { [weak self] in self?.composeShow(j) }
                         continue
                     }
                     if line.hasPrefix("⌨ "), let j = try? JSONSerialization.jsonObject(with: Data(line.dropFirst(2).utf8)) as? [String: Any], let a = j["a"] as? String {   // JARVIS needs exact text: the type-in console

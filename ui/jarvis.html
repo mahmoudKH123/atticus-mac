@@ -30,6 +30,42 @@
   .tcItem span { color: rgba(255,190,110,.75); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .tcItem.sel { border-color: rgba(255,170,60,.9); background: rgba(40,18,2,.92); }
   @keyframes tcIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+  /* the compose card: the whole email beside the globe; only his own click or ⌘↵ sends it */
+  #cc { position: fixed; box-sizing: border-box; display: flex; flex-direction: column; gap: .55em; padding: 1em 1.15em 1.05em; visibility: hidden; opacity: 0;
+      transform: translateX(-14px); transition: opacity .3s ease, transform .35s cubic-bezier(.2,.8,.2,1), visibility 0s linear .35s;
+      font-family: "SF Mono", Menlo, monospace; color: #ffdea5; background: rgba(10,5,1,.92); border: 1px solid rgba(255,145,35,.5); }
+  #cc.on { visibility: visible; opacity: 1; transform: none; transition-delay: 0s; }
+  #cc::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: rgba(255,145,35,.95); }
+  #ccHead { display: flex; align-items: baseline; gap: .8em; }
+  #ccHead b { color: rgba(255,145,35,.95); letter-spacing: .1em; font-weight: 500; font-size: .82em; }
+  #ccHead span { color: rgba(255,145,35,.55); font-size: .72em; flex: 1; }
+  #ccX { color: rgba(255,170,80,.7); cursor: default; font-size: .9em; padding: 0 .2em; }
+  #ccX:hover { color: #fff3dc; }
+  .ccRow { display: flex; align-items: flex-start; gap: .7em; border-bottom: 1px solid rgba(255,145,35,.18); padding-bottom: .4em; position: relative; }
+  .ccRow[hidden] { display: none; }
+  .ccRow > label { flex: 0 0 4.2em; color: rgba(255,145,35,.75); font-size: .74em; letter-spacing: .08em; text-transform: uppercase; padding-top: .35em; }
+  .ccPeople { flex: 1; display: flex; flex-wrap: wrap; gap: .35em; min-width: 0; }
+  .ccChip { display: inline-flex; gap: .45em; align-items: center; padding: .12em .5em; font-size: .86em; background: rgba(255,145,35,.12); border: 1px solid rgba(255,145,35,.35); color: #fff3dc; max-width: 100%; }
+  .ccChip.bad { border-style: dashed; border-color: rgba(255,90,60,.8); color: #ffb9a0; }
+  .ccChip i { font-style: normal; color: rgba(255,170,80,.7); cursor: default; }
+  .ccChip i:hover { color: #fff3dc; }
+  #cc input, #cc textarea { background: transparent; border: 0; outline: 0; color: #fff3dc; font: inherit; caret-color: #ffb347; min-width: 6em; }
+  .ccPeople input { flex: 1; font-size: .9em; padding: .15em 0; }
+  #ccSubject { flex: 1; padding: .15em 0; }
+  #ccBody { flex: 1; resize: none; min-height: 9em; line-height: 1.45; font-size: .92em; padding: .2em 0; }
+  #ccMore { color: rgba(255,145,35,.6); font-size: .72em; cursor: default; padding-top: .45em; white-space: nowrap; }
+  #ccMore:hover { color: #ffdea5; }
+  #ccFiles { flex: 1; display: flex; flex-wrap: wrap; gap: .35em; align-items: center; }
+  .ccBtn { padding: .3em .9em; border: 1px solid rgba(255,145,35,.45); color: #ffdea5; font-size: .8em; letter-spacing: .06em; cursor: default; background: transparent; font-family: inherit; }
+  .ccBtn:hover { border-color: rgba(255,170,60,.95); color: #fff3dc; }
+  #ccSend { background: rgba(255,145,35,.9); color: #1a0c00; border-color: rgba(255,145,35,.95); font-weight: 600; }
+  #ccSend:hover { background: #ffb347; }
+  #ccSend:disabled { opacity: .35; }
+  #ccFoot { display: flex; align-items: center; gap: .7em; }
+  #ccMsg { flex: 1; font-size: .74em; color: rgba(255,170,80,.8); min-height: 1.2em; }
+  #ccMsg.err { color: #ff9a7a; }
+  #ccList { position: absolute; left: 4.9em; right: 0; top: 100%; z-index: 2; display: flex; flex-direction: column; gap: 3px; margin-top: 3px; }
+  #cc.drop { border-color: rgba(255,200,110,1); box-shadow: 0 0 0 1px rgba(255,200,110,.6) inset; }
 </style>
 </head>
 <body>
@@ -39,6 +75,14 @@
 <canvas id="hud"></canvas>
 <div id="tc"><div id="tcLine"></div><div id="tcList"></div>
   <div id="tcBar"><span id="tcLabel"></span><input id="tcIn" autocomplete="off" autocapitalize="off" spellcheck="false"><span id="tcHint">↵ send · esc</span></div></div>
+<div id="cc"><div id="ccHead"><b>EMAIL</b><span>via Apple Mail · Gmail</span><span id="ccX" title="Close (esc)">✕</span></div>
+  <div class="ccRow" data-k="to"><label>To</label><div class="ccPeople"><input></div><span id="ccMore">CC / BCC</span></div>
+  <div class="ccRow" data-k="cc" hidden><label>CC</label><div class="ccPeople"><input></div></div>
+  <div class="ccRow" data-k="bcc" hidden><label>BCC</label><div class="ccPeople"><input></div></div>
+  <div class="ccRow"><label>Subject</label><input id="ccSubject" spellcheck="true"></div>
+  <div class="ccRow" style="flex:1"><textarea id="ccBody" spellcheck="true"></textarea></div>
+  <div class="ccRow"><label>Files</label><div id="ccFiles"><button class="ccBtn" id="ccAttach">+ Attach</button></div></div>
+  <div id="ccFoot"><span id="ccMsg"></span><button class="ccBtn" id="ccCancel">Cancel</button><button class="ccBtn" id="ccSend">Send ⌘↵</button></div></div>
 <script>
 'use strict';
 // =====================================================================
@@ -430,6 +474,127 @@ Object.assign(window.jarvis, {
   },
   typeClose() { tc.classList.remove('on'); tcIn.blur(); tcList.innerHTML = ''; tcItems = []; },
   typing() { return tc.classList.contains('on'); },
+});
+// ----------------------------- the compose card: jarvis.compose({draft, people}) / jarvis.composeClose() -----------------------------
+// The app gets {compose: 'send', draft} only from his own click or ⌘↵ (trusted events), {compose: 'cancel'} on Esc / ✕, {compose: 'attach'} for the file picker.
+const cc = document.getElementById('cc'), ccMsg = document.getElementById('ccMsg'), ccSendB = document.getElementById('ccSend');
+const ccSubject = document.getElementById('ccSubject'), ccBody = document.getElementById('ccBody'), ccFilesEl = document.getElementById('ccFiles');
+let ccPeopleList = [], ccState = { to: [], cc: [], bcc: [], files: [] }, ccSending = false, ccSuggest = { k: '', items: [], sel: -1 };
+const ccPost = m => { try { window.webkit.messageHandlers.jarvis.postMessage(m); } catch (e) { console.log('compose', JSON.stringify(m)); } };
+const isEmail = v => /^[^\s@<>,;]+@[^\s@<>,;]+\.[^\s@<>,;]+$/.test(v);
+const ccRow = k => cc.querySelector(`.ccRow[data-k="${k}"]`);
+function ccResolve(v) {   // a contact's name -> their address when there is exactly one
+  v = v.trim().replace(/^.*<([^>]+)>$/, '$1'); if (isEmail(v)) return v;
+  const q = v.toLowerCase(), hits = ccPeopleList.filter(p => p.emails.length && (p.name.toLowerCase() === q || q.split(/\s+/).every(w => p.name.toLowerCase().split(/\s+/).some(n => n.startsWith(w)))));
+  return hits.length === 1 && hits[0].emails.length === 1 ? hits[0].emails[0] : v;
+}
+function ccPlace() {
+  const R = H * 0.35, cx = W / 2, fs = Math.max(13, Math.round(R * 0.036));
+  const w = Math.min(Math.max(fs * 30, R * 1.3), W - 32), h = Math.min(H - 48, Math.max(fs * 30, R * 1.55));
+  let x = cx - R * 1.3 - w; if (x < 24) x = (W - w) / 2;   // a narrow screen: the card sits over the globe
+  Object.assign(cc.style, { fontSize: fs + 'px', width: w + 'px', height: h + 'px', left: x + 'px', top: (H - h) / 2 + 'px' });
+}
+addEventListener('resize', ccPlace);
+function ccSize(n) { return n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB'; }
+function ccRender() {
+  for (const k of ['to', 'cc', 'bcc']) {
+    const box = ccRow(k).querySelector('.ccPeople'), input = box.querySelector('input');
+    box.querySelectorAll('.ccChip').forEach(c => c.remove());
+    ccState[k].forEach((v, i) => {
+      const c = document.createElement('span'), t = document.createElement('span'), x = document.createElement('i');
+      c.className = 'ccChip' + (isEmail(v) ? '' : ' bad'); c.title = isEmail(v) ? v : 'Not an email address: click to fix';
+      t.textContent = v; x.textContent = '✕'; c.append(t, x); box.insertBefore(c, input);
+      x.onmousedown = e => { e.preventDefault(); ccState[k].splice(i, 1); ccRender(); };
+      t.onmousedown = e => { if (isEmail(v)) return; e.preventDefault(); ccState[k].splice(i, 1); input.value = v; ccRender(); input.focus(); ccSuggestFor(k); };
+    });
+    if (k !== 'to') ccRow(k).hidden = ccRow(k).hidden && !ccState[k].length;
+  }
+  ccFilesEl.querySelectorAll('.ccChip').forEach(c => c.remove());
+  const total = ccState.files.reduce((a, f) => a + (f.size || 0), 0);
+  ccState.files.forEach((f, i) => {
+    const c = document.createElement('span'), t = document.createElement('span'), x = document.createElement('i');
+    c.className = 'ccChip'; c.title = f.path; t.textContent = `${f.name} · ${ccSize(f.size || 0)}`; x.textContent = '✕'; c.append(t, x);
+    x.onmousedown = e => { e.preventDefault(); ccState.files.splice(i, 1); ccRender(); };
+    ccFilesEl.insertBefore(c, document.getElementById('ccAttach'));
+  });
+  const all = [...ccState.to, ...ccState.cc, ...ccState.bcc], bad = all.filter(v => !isEmail(v)), big = total > 25 * 1048576;
+  ccSendB.disabled = ccSending || !ccState.to.length && !all.length || bad.length > 0 || big;
+  if (!ccSending && !ccMsg.classList.contains('err')) ccMsg.textContent = big ? 'Over Gmail’s 25 MB' : bad.length ? `Check ${bad.length === 1 ? 'the address' : bad.length + ' addresses'} in red` : !all.length ? 'Who is it to?' : '';
+}
+function ccCommit(k) {   // what is typed in a To/CC/BCC box becomes chips
+  const input = ccRow(k).querySelector('input'), parts = input.value.split(/[,;]+/).map(v => v.trim()).filter(Boolean);
+  if (!parts.length) return false;
+  ccState[k].push(...parts.map(ccResolve)); input.value = ''; ccCloseSuggest(); ccRender(); return true;
+}
+function ccCloseSuggest() { document.getElementById('ccList')?.remove(); ccSuggest = { k: '', items: [], sel: -1 }; }
+function ccSuggestFor(k) {
+  ccCloseSuggest(); const input = ccRow(k).querySelector('input'), q = input.value.trim().toLowerCase(); if (q.length < 2) return;
+  const items = [];
+  for (const p of ccPeopleList) {
+    const byName = p.name.toLowerCase().split(/\s+/).some(w => w.startsWith(q)) || p.name.toLowerCase().startsWith(q);
+    for (const e of p.emails) if (byName || e.toLowerCase().includes(q)) { items.push({ name: p.name, value: e }); if (items.length >= 4) break; }
+    if (items.length >= 4) break;
+  }
+  if (!items.length) return;
+  const list = document.createElement('div'); list.id = 'ccList';
+  items.forEach((it, i) => {
+    const d = document.createElement('div'), b = document.createElement('b'), s = document.createElement('span');
+    d.className = 'tcItem'; b.textContent = it.name; s.textContent = it.value; d.append(b, s);
+    d.onmousedown = e => { e.preventDefault(); ccPick(k, i); }; list.append(d);
+  });
+  ccRow(k).append(list); ccSuggest = { k, items, sel: -1 };
+}
+function ccPick(k, i) { const it = ccSuggest.items[i]; if (!it) return; ccState[k].push(it.value); ccRow(k).querySelector('input').value = ''; ccCloseSuggest(); ccRender(); ccRow(k).querySelector('input').focus(); }
+function ccDraft() {
+  for (const k of ['to', 'cc', 'bcc']) { const input = ccRow(k).querySelector('input'); if (input.value.trim()) ccCommit(k); }
+  return { kind: 'email', to: ccState.to.slice(), cc: ccState.cc.slice(), bcc: ccState.bcc.slice(), subject: ccSubject.value, body: ccBody.value, files: ccState.files.slice() };
+}
+function ccSend(e) {
+  if (!e || !e.isTrusted || !cc.classList.contains('on') || ccSending) return;   // only his own click or key, never a script
+  const d = ccDraft(); ccRender(); if (ccSendB.disabled) return;
+  ccSending = true; ccMsg.classList.remove('err'); ccMsg.textContent = 'Sending…'; ccSendB.disabled = true; ccPost({ compose: 'send', draft: d });
+}
+function ccCancel() { if (!cc.classList.contains('on') || ccSending) return; ccPost({ compose: 'cancel' }); jarvis.composeClose(); }
+for (const k of ['to', 'cc', 'bcc']) {
+  const input = ccRow(k).querySelector('input');
+  input.addEventListener('input', () => { if (/[,;]$/.test(input.value)) ccCommit(k); else ccSuggestFor(k); });
+  input.addEventListener('blur', () => setTimeout(() => { if (document.activeElement !== input) { ccCommit(k); ccCloseSuggest(); } }, 120));
+  input.addEventListener('keydown', e => {
+    const n = ccSuggest.k === k ? ccSuggest.items.length : 0;
+    if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && n) { e.preventDefault(); ccSuggest.sel = (ccSuggest.sel + (e.key === 'ArrowDown' ? 1 : n) + 1) % (n + 1) - 1; document.querySelectorAll('#ccList .tcItem').forEach((d, i) => d.classList.toggle('sel', i === ccSuggest.sel)); }
+    else if ((e.key === 'Enter' && !e.metaKey || e.key === 'Tab' && input.value.trim()) && (n || input.value.trim())) { e.preventDefault(); if (n && (ccSuggest.sel >= 0 || e.key === 'Tab')) ccPick(k, Math.max(0, ccSuggest.sel)); else ccCommit(k); }
+    else if (e.key === 'Backspace' && !input.value && ccState[k].length) { ccState[k].pop(); ccRender(); }
+  });
+}
+cc.querySelectorAll('.ccPeople').forEach(b => b.addEventListener('mousedown', e => { if (e.target === b) { e.preventDefault(); b.querySelector('input').focus(); } }));
+document.getElementById('ccMore').onmousedown = e => { e.preventDefault(); ccRow('cc').hidden = false; ccRow('bcc').hidden = false; ccRow('cc').querySelector('input').focus(); };
+document.getElementById('ccAttach').onclick = e => { if (e.isTrusted) ccPost({ compose: 'attach' }); };
+document.getElementById('ccX').onmousedown = e => { e.preventDefault(); ccCancel(); };
+document.getElementById('ccCancel').onclick = () => ccCancel();
+ccSendB.onclick = e => ccSend(e);
+[ccSubject, ccBody].forEach(el => el.addEventListener('input', () => { if (ccMsg.classList.contains('err')) { ccMsg.classList.remove('err'); ccRender(); } }));
+cc.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && e.metaKey) { e.preventDefault(); ccSend(e); }
+  else if (e.key === 'Escape') { e.preventDefault(); if (ccSuggest.items.length) ccCloseSuggest(); else ccCancel(); }
+});
+Object.assign(window.jarvis, {
+  compose(o) {
+    o = o || {}; if (Array.isArray(o.people)) ccPeopleList = o.people;
+    const d = o.draft; ccSending = false; ccMsg.classList.remove('err'); ccMsg.textContent = '';
+    if (d) {   // a fresh or AI-updated draft; null keeps what is on the card (he may have typed)
+      for (const k of ['to', 'cc', 'bcc']) { ccState[k] = (d[k] || []).map(String).map(ccResolve); ccRow(k).querySelector('input').value = ''; }
+      ccRow('cc').hidden = !ccState.cc.length; ccRow('bcc').hidden = !ccState.bcc.length;
+      ccSubject.value = d.subject || ''; ccBody.value = d.body || ''; ccState.files = Array.isArray(d.files) ? d.files.slice() : [];
+    }
+    ccCloseSuggest(); ccRender(); ccPlace(); cc.classList.add('on');
+    setTimeout(() => { if (!ccState.to.length) ccRow('to').querySelector('input').focus(); else if (!ccBody.value) ccBody.focus(); }, 80);
+  },
+  composeClose() { cc.classList.remove('on'); ccSending = false; ccCloseSuggest(); document.activeElement && document.activeElement.blur(); },
+  composeNow() { return JSON.stringify(ccDraft()); },
+  composeFiles(files) { for (const f of files || []) if (!ccState.files.some(x => x.path === f.path)) ccState.files.push(f); ccRender(); },
+  composeError(msg) { ccSending = false; ccMsg.classList.add('err'); ccMsg.textContent = String(msg || 'Not sent').slice(0, 160); ccSendB.disabled = false; },
+  composeDrop(on) { cc.classList.toggle('drop', !!on); },
+  composing() { return cc.classList.contains('on'); },
 });
 function drawCards(R, cx, cy, hudP) {
   if (!cards.length) return;

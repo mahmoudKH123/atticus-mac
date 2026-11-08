@@ -2398,12 +2398,13 @@ final class App: NSObject, WKScriptMessageHandler {
     static func hasWakeWord(_ text: String, word: String = "Atticus") -> Bool {
         text.range(of: #"(?i)(?<![\p{L}\p{N}_])"# + NSRegularExpression.escapedPattern(for: word) + #"(?![\p{L}\p{N}_])"#, options: .regularExpression) != nil
     }
-    // JARVIS mode: a hands-free chat stays open until the whole message is a sign-off ("that's all", "thanks Jarvis, that's it").
+    // JARVIS mode: a hands-free chat stays open until the whole message is a sign-off ("that's all", "thanks Jarvis, goodnight", a bare "thank you",
+    // which is also what Whisper invents from silence) or 30 s pass in silence.
     static func endsJarvisChat(_ text: String) -> Bool {
         let t = text.lowercased().replacingOccurrences(of: "\u{2019}", with: "'").replacingOccurrences(of: #"[.,!?;:]"#, with: " ", options: .regularExpression)
             .split(separator: " ").joined(separator: " ")
         let thanks = #"(?:(?:ok|okay|right|alright|all right|thanks|thank you|cheers|great|perfect|cool|no|nope|jarvis|mate) )*"#
-        let end = #"(?:that's all|thats all|that is all|that's it|thats it|that'll be all|good ?bye|bye|bye bye|see you|see ya|stop listening|we're done|were done|i'm done|im done|nothing else|that'll do|that's everything|i'm good|i'm all good|all good|you can go(?: now)?|end (?:the )?(?:conversation|chat))"#
+        let end = #"(?:that's all|thats all|that is all|that's it|thats it|that'll be all|good ?bye|bye|bye bye|see you|see ya|stop listening|we're done|were done|i'm done|im done|nothing else|that'll do|that's everything|i'm good|i'm all good|all good|you can go(?: now)?|end (?:the )?(?:conversation|chat)|good ?night|night night|nighty night|later|laters|see you later|catch you later|talk (?:to you )?later|speak (?:to you )?later|that's enough|thats enough|enough for now|i'm off|im off|i'm out|im out|peace out|go away|go to sleep|you can sleep|ttyl|thanks|thank you|thank you so much|thanks a lot|no thanks|no thank you|nothing)"#
         return t.range(of: "^" + thanks + end + #"(?: (?:for now|thanks|thank you|cheers|jarvis|mate|then))*$"#, options: .regularExpression) != nil
     }
     func stopWake() {
@@ -2680,9 +2681,11 @@ final class App: NSObject, WKScriptMessageHandler {
     func overX(_ p: NSPoint) -> Bool { !pillOn && p.x > panel.frame.width - 42 && p.y > panel.frame.height - 42 }   // the pill has no ✕ corner: its own buttons sit there
     // Words the recognizer should expect: the user's app names plus a few of the user's own (free, on-device).
     // JARVIS mode: names and tech words Mahmoud says often, so the speech model expects them ("get her desktop" was GitHub Desktop).
-    static let jarvisWords = ["Jarvis", "Mahmoud", "GitHub", "GitHub Desktop", "Azure", "Azure DevOps", "DevOps", "Terraform", "Bicep", "pipeline", "Key Vault",
+    static let jarvisWords = ["Jarvis", "email", "emails", "Gmail", "draft", "reminder", "reminders", "calendar", "timer", "alarm", "Wi-Fi", "Bluetooth", "Do Not Disturb",
+                              "Mahmoud", "GitHub", "GitHub Desktop", "Azure", "Azure DevOps", "DevOps", "Terraform", "Bicep", "pipeline", "Key Vault",
                               "Container Apps", "App Service", "Kubernetes", "Docker", "Postgres", "Redis", "Celery", "Django", "Flutter", "Xcode", "Claude", "Spotify",
-                              "Chrome", "Slack", "Teams", "Outlook", "Westcon", "Comstor", "ECS", "New Cairo"]
+                              "Chrome", "Slack", "Teams", "Outlook", "Westcon", "Comstor", "ECS", "AZ-400", "presales", "Laser removal",
+                              "New Cairo", "Fifth Settlement", "Tagamoa", "Maadi", "Zamalek", "Heliopolis", "Nasr City", "Sheikh Zayed", "October", "Dokki", "Mohandessin", "AUC"]
     var hints: [String] {
         let config = (Prefs.path as NSString).deletingLastPathComponent
         let shortcuts = (try? JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: config + "/skills.json")))) as? [String: Any] ?? [:]
@@ -2758,6 +2761,54 @@ final class App: NSObject, WKScriptMessageHandler {
         }
     }
     var jarvisLive: Process?, jarvisLiveIn: FileHandle?, jarvisVoiced = ""
+    // JARVIS mode: timers and alarms set by voice (~/.config/atticus/timers.json, written by atticus.py --timer). A due one
+    // chimes, is said aloud and shown as a notification; one missed by over 10 minutes (Mac asleep, app closed) is dropped.
+    func jarvisTimersTick() {
+        guard Prefs.bool("jarvis") else { return }
+        let path = NSHomeDirectory() + "/.config/atticus/timers.json", now = Date().timeIntervalSince1970
+        guard let data = FileManager.default.contents(atPath: path), let rows = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]],
+              rows.contains(where: { ($0["at"] as? Double ?? .infinity) <= now }) else { return }
+        let lock = Darwin.open(path + ".lock", O_CREAT | O_RDWR, 0o600); guard lock >= 0 else { return }
+        defer { flock(lock, LOCK_UN); Darwin.close(lock) }
+        flock(lock, LOCK_EX)   // atticus.py adds under the same lock: re-read so a timer set this second survives
+        let fresh = FileManager.default.contents(atPath: path).flatMap { (try? JSONSerialization.jsonObject(with: $0)) as? [[String: Any]] } ?? []
+        let due = fresh.filter { ($0["at"] as? Double ?? .infinity) <= now }, left = fresh.filter { ($0["at"] as? Double ?? .infinity) > now }
+        if let out = try? JSONSerialization.data(withJSONObject: left) { try? out.write(to: URL(fileURLWithPath: path), options: .atomic) }
+        for t in due where t["do"] as? String == "focusoff" {   // "do not disturb for an hour" ends on its own, silently, even if missed
+            DispatchQueue.global().async { _ = MacTool.run(["action": "focus", "value": "off"]) }
+        }
+        for t in due where t["do"] == nil && now - (t["at"] as? Double ?? now) < 600 { jarvisTimerRing(t["say"] as? String ?? "Sir, your timer's done.") }
+    }
+    var ordersChecking = false
+    func jarvisOrdersTick() {   // a read-only Gmail order check every 30 min, 9 am to 11 pm; speaks only when an order moves on
+        guard Prefs.bool("jarvis"), !ordersChecking else { return }
+        let hour = Calendar.current.component(.hour, from: Date()), now = Date().timeIntervalSince1970
+        guard (9..<23).contains(hour), now - UserDefaults.standard.double(forKey: "jarvisOrdersAt") >= 1800 else { return }
+        UserDefaults.standard.set(now, forKey: "jarvisOrdersAt"); ordersChecking = true
+        DispatchQueue.global().async {
+            let p = py(["--orders", "--check"]), out = Pipe(); p.standardOutput = out; p.standardError = FileHandle.nullDevice
+            var lines: [String] = []
+            if (try? p.run()) != nil {
+                let data = out.fileHandleForReading.readDataToEndOfFile(); p.waitUntilExit()
+                lines = String(decoding: data, as: UTF8.self).split(separator: "\n").map(String.init).filter { $0.hasPrefix("Sir, your ") }
+            }
+            DispatchQueue.main.async {
+                self.ordersChecking = false
+                if !lines.isEmpty { NSLog("JARVIS: order news \(lines.count)") }
+                lines.prefix(3).forEach { self.jarvisTimerRing($0) }
+            }
+        }
+    }
+    func jarvisTimerRing(_ line: String) {
+        NSLog("JARVIS: timer rang")
+        let note = "display notification \"" + line.replacingOccurrences(of: "\\", with: "").replacingOccurrences(of: "\"", with: "'") + "\" with title \"JARVIS\"" + (Prefs.bool("speak") ? "" : " sound name \"Glass\"")   // spoken: the chime is the sound
+        var err: NSDictionary?; NSAppleScript(source: note)?.executeAndReturnError(&err)
+        guard Prefs.bool("speak") else { return }
+        jarvisSpeakLive("", track: false)   // the same voice: the chime first, then the line
+        try? jarvisLiveIn?.write(contentsOf: Data((jarvisToneLine + "\n").utf8))
+        jarvisSpeakLive(line, track: false)
+        if !busy { jarvisEndLive() }   // mid-reply, the reply's own end closes it
+    }
     func jarvisSpeakLive(_ sentence: String, track: Bool = true) {   // track: false for what is not part of the reply
         guard Prefs.bool("jarvis"), Prefs.bool("speak"), let me = Bundle.main.executableURL else { return }
         if jarvisLive == nil || voice !== jarvisLive || jarvisLive?.isRunning != true {   // this reply's first sentence
@@ -3848,7 +3899,7 @@ final class App: NSObject, WKScriptMessageHandler {
             Timer.scheduledTimer(withTimeInterval: 0.15, repeats: true) { [weak self] t in
                 guard let self, listenID == listeningID, engine.isRunning, !whisperReleasing else { return t.invalidate() }
                 let f = (dictating ? dictateHotkey() : hotkey()).flags, held = Date().timeIntervalSince(began)
-                if clickTalk && text.isEmpty && held > ((quietFollowUp || handsFree && picking) && Prefs.bool("jarvis") ? 50 : 8) { t.invalidate(); if quietFollowUp && Prefs.bool("jarvis") { hush(); followUp = true; return wakeTick() }; if quietFollowUp { hush(); fadeIdleHandsFree(); return }; if offerText != nil { stopOfferInput(); jarvisCardListen(); return }; hush(); js("stopped", ""); return hide(after: 3) }   // nothing said: stop the mic quietly
+                if clickTalk && text.isEmpty && held > (quietFollowUp && Prefs.bool("jarvis") ? 30 : handsFree && picking && Prefs.bool("jarvis") ? 50 : 8) { t.invalidate(); if quietFollowUp && Prefs.bool("jarvis") { hush(); cue("soundStop"); close(clear: false); return }; if quietFollowUp { hush(); fadeIdleHandsFree(); return }; if offerText != nil { stopOfferInput(); jarvisCardListen(); return }; hush(); js("stopped", ""); return hide(after: 3) }   // nothing said: stop the mic quietly
                 if whisper && clickTalk && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && Date().timeIntervalSince(whisperVoice) >= endPause() { t.invalidate(); return stop() }   // heard() is too late for the 1.3 s pause
                 if whisper { whisperTick(listeningID) }
                 else if dictating && held >= nextSpeechRollover { nextSpeechRollover += 50; rolloverSpeech(listeningID: listeningID) }
@@ -5738,6 +5789,8 @@ func jarvisKokoroText(_ text: String) -> String {
         (#"(\d)\s?%"#, "$1 per cent"), (#"(\d)\s?°\s?C\b"#, "$1 degrees"), (#"(\d)\s?°"#, "$1 degrees"),
         (#"(?i)\be\.g\."#, "for example"), (#"(?i)\bi\.e\."#, "that is"), (#"\s&\s"#, " and "), (#"\bvs\.?\s"#, "versus "), (#"~\s?(\d)"#, "about $1"),
         (#"\bOK\b"#, "okay"), (#"\bAPIs\b"#, "A P I's"), (#"\biOS\b"#, "eye O S"), (#"\bmacOS\b"#, "mac O S"),
+        // names it says wrong (each spelling checked by playing it back into Whisper)
+        (#"(?i)\bwestcon\b"#, "West con"), (#"(?i)\bma'?adi\b"#, "Ma'adi"), (#"(?i)\bzamalek\b"#, "Zamalik"), (#"(?i)\bsheikh zayed\b"#, "Sheikh Zayid"),
     ]
     for (pattern, with) in fixes { t = t.replacingOccurrences(of: pattern, with: with, options: .regularExpression) }
     // short capitals are initials (AI, ECS, AWS, URL): letter by letter, unless they're said as a word
@@ -6760,6 +6813,207 @@ let meetingPrepPrompt = "Create a factual plain-text brief for my next meeting. 
 
 
 // Structured EventKit backend; the Python tool owns picks and approval cards.
+// JARVIS mode: instant Mac controls. Brightness, Bluetooth and lock use Apple's private functions, looked up when used:
+// if macOS removes one, that action says it failed instead of guessing.
+enum MacTool {
+    static func sym<T>(_ lib: String, _ name: String, _ type: T.Type) -> T? {
+        guard let h = dlopen(lib, RTLD_LAZY), let p = dlsym(h, name) else { return nil }
+        return unsafeBitCast(p, to: type)
+    }
+    static func script(_ source: String) -> String? {
+        var err: NSDictionary?
+        let r = NSAppleScript(source: source)?.executeAndReturnError(&err)
+        return err == nil ? (r?.stringValue ?? "") : nil
+    }
+    static func run(_ tool: String, _ args: [String]) -> Bool {
+        let p = Process(); p.executableURL = URL(fileURLWithPath: tool); p.arguments = args
+        p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice
+        guard (try? p.run()) != nil else { return false }
+        p.waitUntilExit(); return p.terminationStatus == 0
+    }
+    static func volume() -> Int? { script("output volume of (get volume settings)").flatMap { Int($0) } }
+    static func muted() -> Bool? { script("output muted of (get volume settings)").map { $0 == "true" } }
+    static func builtIn() -> CGDirectDisplayID? {
+        var ids = [CGDirectDisplayID](repeating: 0, count: 16); var n: UInt32 = 0
+        CGGetOnlineDisplayList(16, &ids, &n)
+        return ids.prefix(Int(n)).first { CGDisplayIsBuiltin($0) != 0 }
+    }
+    static let displayServices = "/System/Library/PrivateFrameworks/DisplayServices.framework/DisplayServices"
+    static func brightness() -> Float? {
+        guard let d = builtIn(), let get = sym(displayServices, "DisplayServicesGetBrightness", (@convention(c) (CGDirectDisplayID, UnsafeMutablePointer<Float>) -> Int32).self) else { return nil }
+        var v: Float = 0; return get(d, &v) == 0 ? v : nil
+    }
+    static func setBrightness(_ v: Float) -> Bool {
+        guard let d = builtIn(), let set = sym(displayServices, "DisplayServicesSetBrightness", (@convention(c) (CGDirectDisplayID, Float) -> Int32).self) else { return false }
+        return set(d, max(0, min(1, v))) == 0
+    }
+    static let ioBluetooth = "/System/Library/Frameworks/IOBluetooth.framework/IOBluetooth"
+    static func bluetooth() -> Bool? { sym(ioBluetooth, "IOBluetoothPreferenceGetControllerPowerState", (@convention(c) () -> Int32).self).map { $0() == 1 } }
+    static func setBluetooth(_ on: Bool) -> Bool {
+        guard let set = sym(ioBluetooth, "IOBluetoothPreferenceSetControllerPowerState", (@convention(c) (Int32) -> Void).self) else { return false }
+        set(on ? 1 : 0)
+        for _ in 0..<30 { if bluetooth() == on { return true }; usleep(100_000) }
+        return false
+    }
+    static func output(_ tool: String, _ args: [String]) -> String? {
+        let p = Process(), pipe = Pipe(); p.executableURL = URL(fileURLWithPath: tool); p.arguments = args
+        p.standardOutput = pipe; p.standardError = FileHandle.nullDevice
+        guard (try? p.run()) != nil else { return nil }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile(); p.waitUntilExit()
+        return p.terminationStatus == 0 ? String(decoding: data, as: UTF8.self) : nil
+    }
+    static func wifiDevice() -> String? {   // "Hardware Port: Wi-Fi\nDevice: en0"
+        guard let ports = output("/usr/sbin/networksetup", ["-listallhardwareports"]),
+              let r = ports.range(of: #"Hardware Port: (?:Wi-Fi|AirPort)\s*\nDevice: (\S+)"#, options: .regularExpression) else { return nil }
+        return ports[r].components(separatedBy: "Device: ").last.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+    }
+    static func wifi() -> Bool? {
+        guard let dev = wifiDevice(), let out = output("/usr/sbin/networksetup", ["-getairportpower", dev]) else { return nil }
+        return out.contains(": On")
+    }
+    static func setWifi(_ on: Bool) -> Bool {
+        guard let dev = wifiDevice(), run("/usr/sbin/networksetup", ["-setairportpower", dev, on ? "on" : "off"]) else { return false }
+        return wifi() == on
+    }
+    static func dark() -> Bool? { script("tell application \"System Events\" to tell appearance preferences to get dark mode").map { $0 == "true" } }
+    static var airplaneFile: String { NSHomeDirectory() + "/.config/atticus/airplane.json" }
+    static func percent(_ value: String, now: Int, step: Int = 10) -> Int? {
+        switch value { case "up": return min(100, now + step); case "down": return max(0, now - step)
+        default: return Int(value).map { max(0, min(100, $0)) } }
+    }
+    static func run(_ data: [String: Any]) -> [String: Any] {
+        let action = data["action"] as? String ?? "", value = (data["value"] as? String ?? "").lowercased()
+        func ok(_ text: String) -> [String: Any] { ["ok": true, "text": text] }
+        func fail(_ text: String) -> [String: Any] { ["error": text] }
+        let onOff: Bool? = value == "on" ? true : value == "off" ? false : nil
+        switch action {
+        case "status":
+            var s: [String: Any] = [:]
+            s["volume"] = volume(); s["muted"] = muted(); s["brightness"] = brightness().map { Int(($0 * 100).rounded()) }
+            s["wifi"] = wifi(); s["bluetooth"] = bluetooth(); s["dark"] = dark()
+            return s
+        case "volume":
+            guard let now = volume(), let v = percent(value, now: now) else { return fail("Couldn't read or set the volume.") }
+            guard script("set volume output volume \(v) without output muted") != nil else { return fail("Couldn't set the volume.") }
+            return ok("Volume's at \(v).")
+        case "mute", "unmute":
+            guard script("set volume \(action == "mute" ? "with" : "without") output muted") != nil else { return fail("Couldn't change mute.") }
+            return ok(action == "mute" ? "Muted." : "Sound's back on.")
+        case "brightness":
+            guard let now = brightness(), let v = percent(value, now: Int((now * 100).rounded()), step: 15) else { return fail("Couldn't reach the screen brightness. It works on the MacBook screen only.") }
+            guard setBrightness(Float(v) / 100) else { return fail("Couldn't set the brightness.") }
+            return ok("Brightness at \(v).")
+        case "dark":
+            guard let on = onOff else { return fail("Say on or off.") }
+            guard script("tell application \"System Events\" to tell appearance preferences to set dark mode to \(on)") != nil else { return fail("Couldn't switch the appearance. Atticus may need permission to control System Events.") }
+            return ok(on ? "Dark mode on." : "Light mode on.")
+        case "wifi":
+            guard let on = onOff else { return fail("Say on or off.") }
+            return setWifi(on) ? ok("Wi-Fi's \(on ? "on" : "off").") : fail("Couldn't switch Wi-Fi \(on ? "on" : "off").")
+        case "bluetooth":
+            guard let on = onOff else { return fail("Say on or off.") }
+            return setBluetooth(on) ? ok("Bluetooth's \(on ? "on" : "off").") : fail("Couldn't switch Bluetooth \(on ? "on" : "off").")
+        case "airplane":   // macOS has no airplane mode: Wi-Fi and Bluetooth off, then back to how they were
+            guard let on = onOff else { return fail("Say on or off.") }
+            if on {
+                let before: [String: Any] = ["wifi": wifi() ?? true, "bluetooth": bluetooth() ?? true]
+                if let json = try? JSONSerialization.data(withJSONObject: before) { try? json.write(to: URL(fileURLWithPath: airplaneFile)) }
+                let w = setWifi(false), b = setBluetooth(false)
+                return w && b ? ok("Airplane mode on. Wi-Fi and Bluetooth are off.") : fail("Only partly: Wi-Fi \(w ? "off" : "still on"), Bluetooth \(b ? "off" : "still on").")
+            }
+            let before = (try? Data(contentsOf: URL(fileURLWithPath: airplaneFile))).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Bool] } ?? [:]
+            let w = setWifi(before["wifi"] ?? true), b = setBluetooth(before["bluetooth"] ?? true)
+            try? FileManager.default.removeItem(atPath: airplaneFile)
+            return w && b ? ok("Airplane mode off. Back to how it was.") : fail("Only partly: Wi-Fi \(w ? "back" : "not back"), Bluetooth \(b ? "back" : "not back").")
+        case "screenshot":
+            let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss"
+            let path = NSHomeDirectory() + "/Desktop/Screenshot \(f.string(from: Date())).png"
+            guard run("/usr/sbin/screencapture", ["-x", path]), FileManager.default.fileExists(atPath: path) else { return fail("Couldn't take the screenshot. Atticus may need Screen Recording permission.") }
+            return ["ok": true, "text": "Screenshot's on your Desktop.", "path": path]
+        case "lock":
+            guard let lock = sym("/System/Library/PrivateFrameworks/login.framework/Versions/Current/login", "SACLockScreenImmediate", (@convention(c) () -> Int32).self) else { return fail("Couldn't lock the screen.") }
+            _ = lock(); return ok("Locked.")
+        case "displaysleep":
+            return run("/usr/bin/pmset", ["displaysleepnow"]) ? ok("Screen's off.") : fail("Couldn't turn the screen off.")
+        case "focus":   // macOS lets no app switch Focus itself: two Shortcuts the user made once do it
+            guard let on = onOff else { return fail("Say on or off.") }
+            let name = on ? "JARVIS Focus On" : "JARVIS Focus Off"
+            guard (output("/usr/bin/shortcuts", ["list"]) ?? "").components(separatedBy: "\n").contains(name) else { return fail("I need the \"\(name)\" shortcut first. It's a one-time setup in the Shortcuts app.") }
+            return run("/usr/bin/shortcuts", ["run", name]) ? ok(on ? "Do Not Disturb's on." : "Do Not Disturb's off.") : fail("The \"\(name)\" shortcut didn't run.")
+        default:
+            return fail("Unknown Mac action.")
+        }
+    }
+}
+
+// JARVIS mode: Apple Reminders through EventKit (much faster than an AppleScript per ask). It asks for access on first use.
+enum RemindersTool {
+    static func row(_ r: EKReminder) -> [String: Any] {
+        let f = ISO8601DateFormatter(); f.timeZone = .current; f.formatOptions = [.withInternetDateTime]
+        let due = r.dueDateComponents.flatMap { Calendar.current.date(from: $0) }
+        return ["id": r.calendarItemIdentifier, "title": r.title ?? "", "due": due.map { f.string(from: $0) } ?? "",
+                "list": r.calendar.title, "notes": r.notes ?? "", "done": r.isCompleted]
+    }
+    static func access(_ store: EKEventStore) -> Bool {
+        if EKEventStore.authorizationStatus(for: .reminder) == .notDetermined {
+            let asked = DispatchSemaphore(value: 0)
+            store.requestFullAccessToReminders { _, _ in asked.signal() }
+            _ = asked.wait(timeout: .now() + 60)
+        }
+        return EKEventStore.authorizationStatus(for: .reminder) == .fullAccess
+    }
+    static func fetch(_ store: EKEventStore, _ predicate: NSPredicate) -> [EKReminder] {
+        var found: [EKReminder] = []; let done = DispatchSemaphore(value: 0)
+        store.fetchReminders(matching: predicate) { found = $0 ?? []; done.signal() }
+        _ = done.wait(timeout: .now() + 15)
+        return found
+    }
+    static func setDue(_ r: EKReminder, _ value: Any?) {
+        guard let text = value as? String else { return }
+        r.alarms?.forEach { r.removeAlarm($0) }
+        guard let due = CalendarTool.date(text) else { r.dueDateComponents = nil; return }   // "" clears it
+        r.dueDateComponents = Calendar.current.dateComponents([.year, .month, .day, .hour, .minute, .timeZone], from: due)
+        r.addAlarm(EKAlarm(absoluteDate: due))   // so it actually alerts at that time
+    }
+    static func run(_ data: [String: Any], store: EKEventStore = EKEventStore()) throws -> [String: Any] {
+        guard access(store) else { return ["need": "reminders"] }
+        let action = data["action"] as? String ?? "", lists = store.calendars(for: .reminder)
+        let named = (data["list"] as? String).flatMap { name in lists.first { $0.title.localizedCaseInsensitiveCompare(name) == .orderedSame } }
+        if data["list"] is String, named == nil { return ["error": "No list with that name.", "lists": lists.map { $0.title }] }
+        if action == "list" {
+            let done = data["done"] as? Bool ?? false, query = data["query"] as? String ?? ""
+            let scope = named.map { [$0] }
+            let found = fetch(store, done ? store.predicateForCompletedReminders(withCompletionDateStarting: Date().addingTimeInterval(-14 * 86400), ending: nil, calendars: scope)
+                                          : store.predicateForIncompleteReminders(withDueDateStarting: nil, ending: nil, calendars: scope))
+            let rows = found.filter { query.isEmpty || ($0.title ?? "").localizedCaseInsensitiveContains(query) }.map { row($0) }
+                .sorted { (($0["due"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "~") < (($1["due"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "~") }
+            return ["reminders": Array(rows.prefix(60)), "lists": lists.map { $0.title }]
+        }
+        if action == "add" {
+            guard let title = data["title"] as? String, !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return ["error": "A title is required."] }
+            guard let target = named ?? store.defaultCalendarForNewReminders(), target.allowsContentModifications else { return ["error": "Choose a writable list."] }
+            let r = EKReminder(eventStore: store); r.calendar = target; r.title = title
+            if let notes = data["notes"] as? String, !notes.isEmpty { r.notes = notes }
+            setDue(r, data["due"])
+            try store.save(r, commit: true)
+            return ["reminder": row(r)]
+        }
+        guard ["edit", "complete", "delete"].contains(action) else { return ["error": "Unknown reminders action."] }
+        guard let id = data["id"] as? String, let r = store.calendarItem(withIdentifier: id) as? EKReminder else { return ["error": "Reminder not found. List again for its id."] }
+        guard r.calendar.allowsContentModifications else { return ["error": "This list is read-only."] }
+        if action == "delete" { let gone = row(r); try store.remove(r, commit: true); return ["deleted": gone] }
+        if action == "complete" { r.isCompleted = true }
+        else {
+            if let title = data["title"] as? String, !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { r.title = title }
+            if let notes = data["notes"] as? String { r.notes = notes.isEmpty ? nil : notes }
+            setDue(r, data["due"])
+            if let named { r.calendar = named }
+        }
+        try store.save(r, commit: true)
+        return ["reminder": row(r)]
+    }
+}
+
 enum CalendarTool {
     static func date(_ value: Any?) -> Date? {
         guard let text = value as? String else { return nil }
@@ -8949,6 +9203,20 @@ if CommandLine.arguments.dropFirst() == ["--calendar"] {
     if let json = try? JSONSerialization.data(withJSONObject: result), let text = String(data: json, encoding: .utf8) { print(text) }
     exit(0)
 }
+if CommandLine.arguments.dropFirst() == ["--mac"] {
+    let data = (try? JSONSerialization.jsonObject(with: FileHandle.standardInput.readDataToEndOfFile())) as? [String: Any] ?? [:]
+    if let json = try? JSONSerialization.data(withJSONObject: MacTool.run(data)), let text = String(data: json, encoding: .utf8) { print(text) }
+    exit(0)
+}
+if CommandLine.arguments.dropFirst() == ["--reminders"] {
+    let result: [String: Any]
+    do {
+        guard let data = try JSONSerialization.jsonObject(with: FileHandle.standardInput.readDataToEndOfFile()) as? [String: Any] else { throw Hands.Failure("Expected a reminders JSON object.") }
+        result = try RemindersTool.run(data)
+    } catch { result = ["error": "Reminders could not finish: \(error.localizedDescription)"] }
+    if let json = try? JSONSerialization.data(withJSONObject: result), let text = String(data: json, encoding: .utf8) { print(text) }
+    exit(0)
+}
 if CommandLine.arguments.count >= 2, CommandLine.arguments[1] == "--hands" { exit(Hands.cli(Array(CommandLine.arguments.dropFirst(2)))) }
 if CommandLine.arguments.dropFirst() == ["--draw-target"] {
     let windows = CGWindowListCopyWindowInfo(.optionOnScreenOnly,kCGNullWindowID) as? [[String:Any]] ?? []
@@ -9100,6 +9368,8 @@ func checkMic() {
 Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in checkMic() }
 let app = App()
 Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in app.wakeTick() }
+Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in app.jarvisTimersTick() }   // JARVIS timers and alarms; returns at once when off
+Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { _ in app.jarvisOrdersTick() }   // JARVIS order news; returns at once when off or not due
 Timer.scheduledTimer(withTimeInterval: 1.0 / 30, repeats: true) { _ in app.jarvisTick() }   // JARVIS mode's face; returns at once when off
 let agentsUI = AgentPanels()
 let routineWake = RoutineWake()

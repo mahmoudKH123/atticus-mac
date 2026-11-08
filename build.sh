@@ -36,6 +36,8 @@ cat > "$APP/Contents/Info.plist" <<P
 <key>LSUIElement</key><true/>
 <key>NSMicrophoneUsageDescription</key><string>Atticus listens when you use its shortcut or microphone button.</string>
 <key>NSAppleEventsUsageDescription</key><string>Atticus controls apps like Finder, Chrome and Music when you ask it to.</string>
+<key>NSBluetoothAlwaysUsageDescription</key><string>In JARVIS mode, Atticus turns Bluetooth on or off when you ask.</string>
+<key>NSRemindersFullAccessUsageDescription</key><string>In JARVIS mode, Atticus reads and adds your reminders when you ask, and asks before deleting one.</string>
 <key>NSCalendarsFullAccessUsageDescription</key><string>Atticus reads your calendar, adds events you request, and asks before moving or deleting existing events. Calendar details are sent to your chosen AI model.</string>
 <key>NSSpeechRecognitionUsageDescription</key><string>Atticus turns your words into text on this Mac.</string>
 </dict></plist>

@@ -602,7 +602,7 @@ RISKY = [('Delete something?', r'\b(rm|rmdir|srm|unlink|shred|trash|mv)\s|\bdele
 RISKY_LABEL = r"(?i)\b(buy|purchase|pay|payment|checkout|order|send|delete|remove|trash|submit|publish|post|sign.?out|log.?out|unsubscribe|subscribe|transfer|bid|erase|withdraw|donate|authorize|grant access|allow access|logout|book|reserve|merge|deploy|discard|wipe|format|apply(?! filters| changes| settings| coupon| code| promo| discount| theme| style| formatting)|confirm)\b"
 RUNS = ('.command', '.tool', '.terminal', '.sh', '.zsh', '.bash', '.app', '.workflow', '.action')   # macOS runs these when opened
 APP_DIRS = ('/Applications/', '/System/Applications/', os.path.join(HOME, 'Applications') + '/')
-QUIET = (DRAW, SEARCH, READ, LOOK, FRONT, SHOW, PLACE, PLAY, QUEUE, TYPE, REMEMBER, FORGET, ABOUT, PICK, SET, WEB, HISTORY, HANDS, WINDOW, f'{shlex.quote(ME)} --calendar ', f'{shlex.quote(ME)} --reminders ', f'{shlex.quote(ME)} --mac ', f'{shlex.quote(ME)} --timer ', f'{shlex.quote(ME)} --mail ', f'{shlex.quote(ME)} --shop ', 'open ', 'mdfind ', 'pbpaste')   # helpers confirm their own risky actions
+QUIET = (DRAW, SEARCH, READ, LOOK, FRONT, SHOW, PLACE, PLAY, QUEUE, TYPE, REMEMBER, FORGET, ABOUT, PICK, SET, WEB, HISTORY, HANDS, WINDOW, f'{shlex.quote(ME)} --calendar ', f'{shlex.quote(ME)} --reminders ', f'{shlex.quote(ME)} --mac ', f'{shlex.quote(ME)} --timer ', f'{shlex.quote(ME)} --mail ', f'{shlex.quote(ME)} --shop ', f'{shlex.quote(ME)} --whatsapp ', 'open ', 'mdfind ', 'pbpaste')   # helpers confirm their own risky actions
 
 
 def launches_program(part):
@@ -5400,7 +5400,7 @@ def agents_service():
     finally: manager.close()
 
 
-JARVIS_TOOLS = f"\nReminders (any language): {shlex.quote(ME)} --reminders --help for JSON list/add/edit/complete/delete; always use it, never AppleScript.\nMac controls: {shlex.quote(ME)} --mac --help (volume, mute, brightness, dark mode, Wi-Fi, Bluetooth, airplane mode, Do Not Disturb, screenshot, lock, screen off, status); use it for these.\nTimers and alarms: {shlex.quote(ME)} --timer --help; use it, never sleep or AppleScript.\nOther Mac settings: open x-apple.systempreferences:<page id>, then {HANDS}; every change there asks him first. Security and privacy pages, sudo and security commands are blocked: open the page and let him change it.\nEmail (his personal Gmail): {shlex.quote(ME)} --mail '<what he wants, in plain words>'; it reads, searches, summarises and saves drafts, never sends. Say its answer in your own short words; he sends drafts himself.\nOrders and deliveries (any shop): {shlex.quote(ME)} --orders gives his current orders from Gmail; answer from it in a sentence or two.\nShopping: one step, no browsing: {shlex.quote(ME)} --shop '<short search phrase>' [shops] [--cheapest when he wants the cheapest]. Shops: the one he names, else the right ones for the item (default amazon noon jumia; add 2b for electronics, ikea for furniture and home, carrefour for groceries; aliexpress or temu only if he says cheap or from abroad). Then a few words ('Amazon, Noon and Jumia are up, sir.') and stop: he takes it from there. Never read options, add to cart or check out unless he asks; never type card numbers or passwords; the final buy button is always his."
+JARVIS_TOOLS = f"\nReminders (any language): {shlex.quote(ME)} --reminders --help for JSON list/add/edit/complete/delete; always use it, never AppleScript.\nMac controls: {shlex.quote(ME)} --mac --help (volume, mute, brightness, dark mode, Wi-Fi, Bluetooth, airplane mode, Do Not Disturb, screenshot, lock, screen off, status); use it for these.\nTimers and alarms: {shlex.quote(ME)} --timer --help; use it, never sleep or AppleScript.\nOther Mac settings: open x-apple.systempreferences:<page id>, then {HANDS}; every change there asks him first. Security and privacy pages, sudo and security commands are blocked: open the page and let him change it.\nEmail (his personal Gmail): {shlex.quote(ME)} --mail '<what he wants, in plain words>'; it reads, searches, summarises and saves drafts, never sends. Say its answer in your own short words; he sends drafts himself.\nOrders and deliveries (any shop): {shlex.quote(ME)} --orders gives his current orders from Gmail; answer from it in a sentence or two.\nLanguage: he may speak Egyptian Arabic or mix it with English, in Arabic script or transliterated (\"eftah Spotify\", \"fakkarni bokra\"); understand it and always answer in English. Speech recognition may write English words in Arabic letters (\"سبوتيفاي\" = Spotify).\nWhatsApp: {shlex.quote(ME)} --whatsapp '<name>' '<message>' (people in his contacts only). Tidy what he said into a short, casual message in his own voice and in the language he used (\"tell Ahmed I'm running late\" -> \"Running a bit late, sorry!\"). It opens the chat with the text typed; he presses send. Never claim it was sent; say it's ready for him to send.\nShopping: one step, no browsing: {shlex.quote(ME)} --shop '<short search phrase>' [shops] [--cheapest when he wants the cheapest]. Shops: the one he names, else the right ones for the item (default amazon noon jumia; add 2b for electronics, ikea for furniture and home, carrefour for groceries; aliexpress or temu only if he says cheap or from abroad). Then a few words ('Amazon, Noon and Jumia are up, sir.') and stop: he takes it from there. Never read options, add to cart or check out unless he asks; never type card numbers or passwords; the final buy button is always his."
 
 JARVIS = """
 JARVIS mode (overrides your name, reply length and tone above): you're Jarvis, his own AI, running his Mac and his day. Talk like a quick-witted British right hand: composed, dry, understated, warm, a bit cheeky. Polished, never stiff or scripted.
@@ -7150,6 +7150,37 @@ JARVIS_BUY_STOP = ('Stopped: that button completes the purchase, and he always p
                    'the total and the delivery date, and that it is ready for him to buy. Do not try another way.')
 
 
+# JARVIS mode WhatsApp: opens the person's chat in WhatsApp Desktop with the message typed; he presses send. The number comes only
+# from his Mac Contacts (never guessed); WhatsApp's own link (whatsapp://send) only fills the box, it cannot send.
+def whatsapp_number(phone):
+    """Contacts phone -> WhatsApp's international digits (Egyptian 01x mobiles get 20), or '' if it can't be a phone number."""
+    digits = re.sub(r'\D', '', phone or '')
+    if digits.startswith('00'): digits = digits[2:]
+    elif re.fullmatch(r'01\d{9}', digits): digits = '2' + digits   # 010/011/012/015 mobile -> +20
+    return digits if 8 <= len(digits) <= 15 else ''
+
+
+def whatsapp_tool(args):
+    if args == ['--help'] or len(args) != 2:
+        return "--whatsapp '<name from his contacts>' '<message>': opens that chat in WhatsApp with the message typed; he presses send."
+    name, text = args[0].strip(), args[1].strip()[:2000]
+    if not name or not text: return 'Who to, and what should it say?'
+    try: found = json.loads(contacts(name)).get('matches', [])
+    except ValueError: return 'Contacts are not reachable right now.'
+    people = [(p['name'], [n for n in map(whatsapp_number, p.get('phones', [])) if n]) for p in found]
+    people = [(n, phones) for n, phones in people if phones]
+    if not people: return f'No WhatsApp number for {name} in his contacts. Say so; never guess a number.'
+    exact = [p for p in people if p[0].casefold() == name.casefold()]
+    if len(exact) == 1: people = exact
+    if len(people) > 1:
+        return 'Several people match: ' + '; '.join(n for n, _ in people[:8]) + '. Ask him which with --pick, then call again with that exact name.'
+    who, phones = people[0]
+    phone = next((p for p in phones if re.fullmatch(r'201[0125]\d{8}', p)), phones[0])   # an Egyptian mobile first
+    r = subprocess.run(['open', 'whatsapp://send?' + urllib.parse.urlencode({'phone': phone, 'text': text}, quote_via=urllib.parse.quote)], capture_output=True, text=True, timeout=15)
+    if r.returncode: return 'WhatsApp did not open: ' + r.stderr.strip()[:200]
+    return f'WhatsApp is open on {who} with the message typed. Not sent: he presses send.'
+
+
 # JARVIS mode shopping: open the shops' own search results in Chrome tabs and leave him to it. Known shops have their search link;
 # any other shop he names is searched on Google limited to that site.
 SHOPS = {
@@ -8454,6 +8485,8 @@ def main():
         return print(timer_tool(args[1:]))
     if args[:1] == ['--mail']:
         return print(mail_tool(args[1:]))
+    if args[:1] == ['--whatsapp']:
+        return print(whatsapp_tool(args[1:]))
     if args[:1] == ['--shop']:
         return print(shop_tool(args[1:]))
     if args[:1] == ['--orders']:

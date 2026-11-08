@@ -388,7 +388,7 @@ class JarvisTalkOverTests(unittest.TestCase):
     def test_his_own_echo_never_stops_him_but_mahmoud_does(self):
         from tests import run_swift
         app = self.source()
-        helper = app[app.index('func jarvisTalkOver('):app.index('// The talk-over mic')]
+        helper = app[app.index('func jarvisKokoroText('):app.index('// Short lines are kept')] + app[app.index('func jarvisTalkOver('):app.index('// The talk-over mic')]
         said = "Morning, Mahmoud. It's 24 degrees in New Cairo and your calendar's clear till three."
         cases = {
             'morning mahmoud its 24 degrees in new cairo': 'nil',            # his voice from the speakers
@@ -397,11 +397,46 @@ class JarvisTalkOverTests(unittest.TestCase):
             'morning mahmoud wait': '2',                                     # one interrupt word is enough
             'jarvis': '0',
             'um': 'nil',                                                     # one stray word is not enough
+            'its 20 degrees in new cairo': 'nil',                            # "24" heard as "20": a number is never his words
         }
         body = helper + 'let said = ' + json.dumps(said) + '\n' + ''.join(
-            f'print(jarvisTalkOver("{h}".split(separator: " ").map(String.init), spoken: said).map(String.init) ?? "nil")\n' for h in cases)
+            f'print(jarvisTalkOver("{h}".split(separator: " ").map(String.init), spoken: said + " " + jarvisKokoroText(said)).map(String.init) ?? "nil")\n' for h in cases)
         body = 'import Foundation\n' + body
         self.assertEqual(run_swift(self, body).split(), list(cases.values()))
+
+    def test_todays_echoes_and_made_up_lines_are_not_his_words(self):
+        from tests import run_swift
+        app = self.source()
+        helper = app[app.index('func jarvisKokoroText('):app.index('// Short lines are kept')] + app[app.index('func jarvisTalkOver('):app.index('// The talk-over mic')] \
+            + 'enum W {\n' + app[app.index('static func madeUp'):app.index('    static func wav(')] + '}\n'
+        cases = [  # (what he said, what the talk-over mic heard, expected)
+            ("Cairo's partly cloudy and 24 degrees, sir, though it feels closer to 21 with the breeze.", 'cairos partly cloudy in 20', 'nil'),   # cut him off on 08/11
+            ('Amazon, Noon and Jumia are up, sir.', 'amazon noonan jumia are up', 'nil'),
+            ("Cairo's partly cloudy and 24 degrees.", 'cairos partly what about tomorrow', '2'),   # Mahmoud cutting in still works
+        ]
+        body = 'import Foundation\n' + helper + ''.join(
+            f'print(jarvisTalkOver({json.dumps(h)}.split(separator: " ").map(String.init), spoken: {json.dumps(said)} + " " + jarvisKokoroText({json.dumps(said)})).map(String.init) ?? "nil")\n' for said, h, _ in cases)
+        spk = [  # on speakers only the interrupt words count
+            ('This weekend is today, Sunday the 8th, with yesterday the 7th.', 'this weekend is today sunday the eighth with yesterday the seventh', 'nil'),   # cut him off on 08/11
+            ("Cairo's partly cloudy and 24 degrees.", 'cairos partly what about tomorrow', 'nil'),
+            ("Cairo's partly cloudy and 24 degrees.", 'cairos partly stop', '2'),
+            ("Cairo's partly cloudy and 24 degrees.", 'cairos partly hold on', '2'),
+            ("Cairo's partly cloudy and 24 degrees.", 'jarvis', '0'),
+        ]
+        body += ''.join(f'print(jarvisTalkOver({json.dumps(h)}.split(separator: " ").map(String.init), spoken: {json.dumps(said)} + " " + jarvisKokoroText({json.dumps(said)}), wordsOnly: true).map(String.init) ?? "nil")\n' for said, h, _ in spk)
+        echo = {"That's the old tab, sir, still on black dust clamp.": True, 'the old tab': True, 'open the old tab on noon please and close jumia': False, 'yes': False}
+        body += 'let said = JarvisSaid(); said.note("That\'s the old tab, sir, still on \\"black dust clamp\\". The dust clamp search should be in the newer Jumia tab.")\n'
+        body += ''.join(f'print(said.echo({json.dumps(k)}))\n' for k in echo)
+        body += 'let old = JarvisSaid(); old.note("the old tab"); print(old.echo("the old tab", within: 0))\n'   # only right after he spoke
+        made = {'to the channel.': True, 'and see you next time.': True, 'Thanks for watching!': True, 'Subscribe to the channel.': True,
+                'send it to the channel': False, 'see you next time Ahmed, tell him': False, 'goodbye': False}
+        body += ''.join(f'print(W.madeUp({json.dumps(k)}))\n' for k in made)
+        want = [c[2] for c in cases] + [c[2] for c in spk] + [str(v).lower() for v in echo.values()] + ['false'] + [str(v).lower() for v in made.values()]
+        self.assertEqual(run_swift(self, body).split(), want)
+        self.assertIn('Whisper.shared.isEcho = { jarvisSaid.echo($0) }', app)
+        self.assertIn('jarvisSaid.note(jarvisSaying + " " + jarvisKokoroText(jarvisSaying))', app)
+        self.assertIn('spoken: jarvisSaying + " " + jarvisKokoroText(jarvisSaying), wordsOnly: speakers)', app)
+        self.assertIn('let speakers = !jarvisHeadphones()', app)
 
     def test_talk_over_is_jarvis_hands_free_only_and_keeps_voice_approvals(self):
         app = self.source()
@@ -601,6 +636,46 @@ class JarvisResponsivenessTests(unittest.TestCase):
             self.assertEqual(len(run.call_args[0][0]), 6)
             self.assertEqual(atticus.shop_tool(['usb cable', 'noon']), 'Opened Noon in Chrome.')
         self.assertIn(f"{atticus.shlex.quote(atticus.ME)} --shop ", atticus.QUIET)
+
+    def test_understands_egyptian_arabic_and_mixed_speech(self):
+        from tests import run_swift
+        app = self.source()
+        cut = lambda a, b: app[app.index(a):app.index(b, app.index(a))]
+        body = 'import Foundation\nenum T {\n' + cut('static func endsJarvisChat', '    func stopWake()') + cut('static func jarvisYesNo', '    func jarvisEndLive') + cut('static func madeUp', '    static func wav(') + '}\n'
+        ends = {'خلاص شكرا': True, 'تصبح على خير يا جارفس': True, 'مع السلامة': True, 'shokran': True, 'ma3a elsalama': True, 'شكرا.': True,
+                'شكرا، افتح سبوتيفاي': False, 'خلاص اقفل الواي فاي': False, 'thanks, goodnight': True, 'open Spotify': False}
+        yes = {'أيوه': 'true', 'اه تمام': 'true', 'aywa': 'true', 'Ayouh!': 'true', 'لا': 'false', 'لأ، استنى': 'false', 'la2': 'false', 'yes': 'true', 'maybe': 'nil'}
+        made = {'اشتركوا في القناة': True, 'ترجمة نانسي قنقر': True, 'شكرا على المشاهدة': True, 'افتح سبوتيفاي': False, 'Open Spotify.': False}
+        body += ''.join(f'print(T.endsJarvisChat({json.dumps(k, ensure_ascii=False)}))\n' for k in ends)
+        body += ''.join(f'print(T.jarvisYesNo({json.dumps(k, ensure_ascii=False)}).map {{ String($0) }} ?? "nil")\n' for k in yes)
+        body += ''.join(f'print(T.madeUp({json.dumps(k, ensure_ascii=False)}))\n' for k in made)
+        want = [str(v).lower() for v in ends.values()] + list(yes.values()) + [str(v).lower() for v in made.values()]
+        self.assertEqual(run_swift(self, body).strip().split('\n'), want)
+        self.assertIn('let jarvis = auto && Prefs.bool("jarvis")', app)   # JARVIS only; other users keep the old language choice
+        self.assertIn('let sure = ["en", "ar"].contains(top.key) && top.value >= 0.8', app)   # unsure: the language he last spoke clearly
+        self.assertIn('return jarvis && (letters < 2 || Self.madeUp(said) || isEcho(said)) ? "" : said', app)
+        self.assertIn('always answer in English', atticus.JARVIS_TOOLS)
+
+    def test_whatsapp_opens_the_chat_with_the_message_typed_never_sends(self):
+        book = {'matches': [{'name': 'Ahmed Samir', 'phones': ['+44 20 7946 0000', '010 1234 5678']}, {'name': 'Ahmed Ali', 'phones': []}]}
+        ok = atticus.subprocess.CompletedProcess([], 0, '', '')
+        with patch.object(atticus, 'contacts', return_value=json.dumps(book)), patch.object(atticus.subprocess, 'run', return_value=ok) as run:
+            said = atticus.whatsapp_tool(['Ahmed', 'Running a bit late, sorry!'])
+            self.assertEqual(said, 'WhatsApp is open on Ahmed Samir with the message typed. Not sent: he presses send.')
+            self.assertEqual(run.call_args[0][0], ['open', 'whatsapp://send?phone=201012345678&text=Running%20a%20bit%20late%2C%20sorry%21'])   # the Egyptian mobile, not the landline
+        two = {'matches': [{'name': 'Sara Adel', 'phones': ['01011111111']}, {'name': 'Sara Nabil', 'phones': ['01022222222']}]}
+        with patch.object(atticus, 'contacts', return_value=json.dumps(two)), patch.object(atticus.subprocess, 'run') as run:
+            self.assertIn('Several people match: Sara Adel; Sara Nabil', atticus.whatsapp_tool(['Sara', 'hi']))
+            run.assert_not_called()   # never a guess
+        with patch.object(atticus, 'contacts', return_value=json.dumps(two)), patch.object(atticus.subprocess, 'run', return_value=ok) as run:
+            self.assertIn('Sara Nabil', atticus.whatsapp_tool(['sara nabil', 'hi']))
+        with patch.object(atticus, 'contacts', return_value=json.dumps({'matches': []})), patch.object(atticus.subprocess, 'run') as run:
+            self.assertTrue(atticus.whatsapp_tool(['Karim', 'hi']).startswith('No WhatsApp number for Karim'))
+            run.assert_not_called()
+        with patch.object(atticus, 'contacts', return_value='Contacts unavailable. Use the app address book or ask for the recipient.'):
+            self.assertEqual(atticus.whatsapp_tool(['Karim', 'hi']), 'Contacts are not reachable right now.')
+        self.assertIn('Never claim it was sent', atticus.JARVIS_TOOLS)
+        self.assertIn(f"{atticus.shlex.quote(atticus.ME)} --whatsapp ", atticus.QUIET)
 
 
 if __name__ == '__main__':

@@ -402,6 +402,8 @@ final class WhisperAudio: @unchecked Sendable {
 // 10 idle minutes stop it too (up to 1.6 GB), and the next key-down starts it again in ~0.4 s.
 final class Whisper: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
     static let shared = Whisper()
+    var isEcho: (String) -> Bool = { _ in false }   // JARVIS mode: his own voice coming back (set at launch)
+    private var jarvisLanguage: String?   // JARVIS mode: "en" or "ar", the last language he spoke clearly (under the lock)
     struct Model { let id, name, file, sha256: String; let bytes: Int64 }
     static var models = [
         Model(id: "turbo", name: "Turbo", file: "ggml-large-v3-turbo-q5_0.bin", sha256: "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2", bytes: 574041195),
@@ -570,14 +572,16 @@ final class Whisper: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
         return false
     }
 
-    func transcribe(_ pcm: [Float], prompt: String) async throws -> String {
+    func transcribe(_ pcm: [Float], prompt: String, force: String? = nil) async throws -> String {
         // under 0.3 s is a tap; silence gets an invented "Thank you." / "Terima kasih." from Whisper
         guard pcm.count > 16000 * 3 / 10, pcm.contains(where: { abs($0) > 0.01 }) else { return "" }
         let (up, port) = try ensure()
         guard await up.value else { stop(); throw Failed("whisper-server didn’t start.") }   // the next try starts a fresh one
         let boundary = "atticus-\(UUID().uuidString)", lang = Prefs.str("whisperLanguage"), auto = lang.isEmpty || lang == "auto"
         // under 1.5 s auto-detect guesses wildly (a flash of Chinese): use the language last heard clearly, else the Mac's
-        let language = !auto ? lang : pcm.count >= 24000 ? "auto" : lock.withLock { heard } ?? Locale.current.language.languageCode?.identifier ?? "auto"
+        // JARVIS mode: he speaks English, Egyptian Arabic or both: always detect (forcing the last language turned short English into Arabic nonsense)
+        let jarvis = auto && Prefs.bool("jarvis")
+        let language = force ?? (!auto ? lang : jarvis || pcm.count >= 24000 ? "auto" : lock.withLock { heard } ?? Locale.current.language.languageCode?.identifier ?? "auto")
         var body = Data()
         func field(_ name: String, _ value: String) { body.append(Data("--\(boundary)\r\nContent-Disposition: form-data; name=\"\(name)\"\r\n\r\n\(value)\r\n".utf8)) }
         field("response_format", "verbose_json"); field("temperature", "0"); field("language", language)
@@ -595,11 +599,28 @@ final class Whisper: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
         if auto, pcm.count >= 32000, let top = (json["language_probabilities"] as? [String: Double])?.max(by: { $0.value < $1.value }), top.value > 0.8 {
             lock.withLock { heard = top.key }
         }
+        if jarvis, force == nil, let odds = json["language_probabilities"] as? [String: Double], let top = odds.max(by: { $0.value < $1.value }) {
+            let sure = ["en", "ar"].contains(top.key) && top.value >= 0.8
+            NSLog("JARVIS hears: %.1f s, %@ %.2f (en %.2f, ar %.2f)%@", Double(pcm.count) / 16000, top.key, top.value, odds["en"] ?? 0, odds["ar"] ?? 0, sure ? "" : ", unsure")
+            if sure { lock.withLock { jarvisLanguage = top.key } }
+            else {   // short or unclear ("الساعة كام" came back as "Sakep", "أيوه" as French): the language he last spoke clearly
+                let last = lock.withLock { jarvisLanguage }
+                return try await transcribe(pcm, prompt: prompt, force: last ?? ((odds["ar"] ?? 0) > (odds["en"] ?? 0) ? "ar" : "en"))
+            }
+        }
         // segments Whisper itself rates as probably not speech are its hallucinations
         let segments = json["segments"] as? [[String: Any]] ?? []
         let text = segments.isEmpty ? json["text"] as? String ?? ""
             : segments.filter { ($0["no_speech_prob"] as? Double ?? 0) < 0.6 }.compactMap { $0["text"] as? String }.joined()
-        return text.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        let said = text.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        let letters = said.unicodeScalars.filter { CharacterSet.letters.contains($0) }.count   // "." or "A" is noise, not words
+        return jarvis && (letters < 2 || Self.madeUp(said) || isEcho(said)) ? "" : said   // as if silent: he keeps listening
+    }
+    // Lines Whisper invents from noise or a forced language (subtitle credits, "subscribe to the channel"), never what he said.
+    // English ones only when they are the whole transcript ("to the channel.", "and see you next time.").
+    static func madeUp(_ text: String) -> Bool {
+        text.range(of: #"اشتركوا? في القناة|ترجمة نانسي|نانسي قنقر|شكرا (?:لكم )?(?:على|ل)\s?المشاهدة|المترجمات? لكثير|تابعونا|لا تنسوا? الاشتراك"#, options: .regularExpression) != nil
+            || text.range(of: #"(?i)^\W*(?:(?:and |so )?see you (?:next time|in the next (?:one|video))|(?:please )?(?:like and )?subscribe(?: to (?:the|my|our) channel)?|(?:subscribe )?to the channel|thanks? (?:you )?(?:so much )?for watching|(?:thank you|thanks),? (?:for watching|see you next time))\W*$"#, options: .regularExpression) != nil
     }
     static func wav(_ pcm: [Float]) -> Data {   // 16 kHz mono 16-bit PCM
         var d = Data(capacity: 44 + pcm.count * 2)
@@ -777,10 +798,16 @@ func jarvisWarm() {
 func jarvisSpoken(_ words: String) -> String {
     words.replacingOccurrences(of: #",\s+(sir|Sir)\b"#, with: " $1", options: .regularExpression)
 }
+// True when JARVIS's voice goes to Bluetooth headphones (AirPods), so the Mac's mic can't hear it come back.
+func jarvisHeadphones() -> Bool {
+    guard let out = audioProp(AudioObjectID(kAudioObjectSystemObject), kAudioHardwarePropertyDefaultOutputDevice, AudioDeviceID(0)).first, out != 0 else { return false }
+    let bluetooth: Set<UInt32> = [0x626c7565, 0x626c6561]   // 'blue', 'blea'
+    return bluetooth.contains(audioProp(out, kAudioDevicePropertyTransportType, UInt32(0)).first ?? 0)
+}
 // JARVIS talk-over: the mic hears both Mahmoud and, on speakers, JARVIS's own voice coming back as the words he is saying.
 // Returns the index of the first heard word that is Mahmoud's once he has clearly started talking (two words JARVIS
 // isn't saying, or one of "jarvis / stop / wait / hold / hang"), else nil. Near misses of JARVIS's words count as his.
-func jarvisTalkOver(_ heard: [String], spoken: String) -> Int? {
+func jarvisTalkOver(_ heard: [String], spoken: String, wordsOnly: Bool = false) -> Int? {
     func norm(_ w: Substring) -> String { String(w.lowercased().unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) }.map(Character.init)) }
     func near(_ a: [Character], _ b: [Character]) -> Bool {   // one edit apart (the recognizer mishearing his voice)
         if abs(a.count - b.count) > 1 { return false }
@@ -797,13 +824,31 @@ func jarvisTalkOver(_ heard: [String], spoken: String) -> Int? {
     var novel: [Int] = []
     for (k, raw) in heard.enumerated() {
         let w = norm(Substring(raw))
-        guard w.count >= 2, !his.contains(w) else { continue }
+        if ["jarvis", "stop", "wait", "hold", "hang"].contains(w) && !his.contains(w) { return novel.first ?? k }
+        // his own echo through the speakers: "in", a number heard as "20" for "twenty-four", "Noonan" for "Noon"
+        // on speakers his own voice comes back, so only those words count ("the 8th" came back as "eighth" and cut him off)
+        guard !wordsOnly, w.count >= 3, !his.contains(w), w.rangeOfCharacter(from: .decimalDigits) == nil else { continue }
+        if w.count >= 4, his.contains(where: { $0.count >= 4 && (w.hasPrefix($0) || $0.hasPrefix(w)) }) { continue }
         if w.count >= 4, hisChars.contains(where: { near($0, Array(w)) }) { continue }
-        if ["jarvis", "stop", "wait", "hold", "hang"].contains(w) { return novel.first ?? k }
         novel.append(k); if novel.count >= 2 { return novel[0] }
     }
     return nil
 }
+// What JARVIS said last, so his own voice coming back through the speakers is never taken as Mahmoud's next ask.
+final class JarvisSaid: @unchecked Sendable {
+    private let lock = NSLock(); private var words: Set<String> = [], at = Date.distantPast
+    static func words(_ text: String) -> [String] {
+        text.lowercased().split(whereSeparator: { !$0.isLetter && !$0.isNumber && $0 != "'" }).map(String.init).filter { $0.count >= 2 }
+    }
+    func note(_ text: String) { lock.lock(); words = Set(Self.words(text)); at = Date(); lock.unlock() }
+    func echo(_ heard: String, within seconds: Double = 30) -> Bool {   // mostly his own recent words: 3+ words, 80 per cent of them his
+        let w = Self.words(heard)
+        lock.lock(); defer { lock.unlock() }
+        guard w.count >= 3, Date().timeIntervalSince(at) < seconds else { return false }
+        return Double(w.filter(words.contains).count) / Double(w.count) >= 0.8
+    }
+}
+let jarvisSaid = JarvisSaid()
 // The talk-over mic's last ~15 s, so the words that stopped JARVIS start the next ask instead of being lost.
 final class JarvisHeard: @unchecked Sendable {
     private let lock = NSLock(); private var buffers: [(at: Double, b: AVAudioPCMBuffer)] = [], total = 0.0
@@ -2401,11 +2446,14 @@ final class App: NSObject, WKScriptMessageHandler {
     // JARVIS mode: a hands-free chat stays open until the whole message is a sign-off ("that's all", "thanks Jarvis, goodnight", a bare "thank you",
     // which is also what Whisper invents from silence) or 30 s pass in silence.
     static func endsJarvisChat(_ text: String) -> Bool {
-        let t = text.lowercased().replacingOccurrences(of: "\u{2019}", with: "'").replacingOccurrences(of: #"[.,!?;:]"#, with: " ", options: .regularExpression)
+        let t = text.lowercased().replacingOccurrences(of: "\u{2019}", with: "'").replacingOccurrences(of: #"[.,!?;:،؟]"#, with: " ", options: .regularExpression)
             .split(separator: " ").joined(separator: " ")
         let thanks = #"(?:(?:ok|okay|right|alright|all right|thanks|thank you|cheers|great|perfect|cool|no|nope|jarvis|mate) )*"#
         let end = #"(?:that's all|thats all|that is all|that's it|thats it|that'll be all|good ?bye|bye|bye bye|see you|see ya|stop listening|we're done|were done|i'm done|im done|nothing else|that'll do|that's everything|i'm good|i'm all good|all good|you can go(?: now)?|end (?:the )?(?:conversation|chat)|good ?night|night night|nighty night|later|laters|see you later|catch you later|talk (?:to you )?later|speak (?:to you )?later|that's enough|thats enough|enough for now|i'm off|im off|i'm out|im out|peace out|go away|go to sleep|you can sleep|ttyl|thanks|thank you|thank you so much|thanks a lot|no thanks|no thank you|nothing)"#
-        return t.range(of: "^" + thanks + end + #"(?: (?:for now|thanks|thank you|cheers|jarvis|mate|then))*$"#, options: .regularExpression) != nil
+        if t.range(of: "^" + thanks + end + #"(?: (?:for now|thanks|thank you|cheers|jarvis|mate|then))*$"#, options: .regularExpression) != nil { return true }
+        // the same in Egyptian Arabic, Arabic script or Franco ("خلاص شكرا", "تصبح على خير", "ma3a elsalama")
+        let arabic = #"(?:خلاص|كفاية|كده تمام|شكرا|شكراً|متشكر|ميرسي|مرسي|تصبح على خير|تصبحوا على خير|مع السلامة|سلام|باي|يلا باي|khalas|kefaya|shokran|merci|tesbah 3ala kheir|ma3a el ?salama|salam|yalla bye)"#
+        return t.range(of: "^(?:(?:جارفس|jarvis|يا جارفس|ya jarvis|تمام|tamam|اوكي|ok) )*" + arabic + "(?: " + arabic + "| جارفس| jarvis| يا جارفس)*$", options: .regularExpression) != nil
     }
     func stopWake() {
         wakeID += 1
@@ -2848,6 +2896,7 @@ final class App: NSObject, WKScriptMessageHandler {
     func jarvisLiveWrite(_ text: String) {
         let line = jarvisSpoken(spoken(text)).components(separatedBy: .newlines).joined(separator: " ")
         jarvisSaying += " " + line
+        jarvisSaid.note(jarvisSaying + " " + jarvisKokoroText(jarvisSaying))   // as written and as the voice says it
         if !line.trimmingCharacters(in: .whitespaces).isEmpty { try? jarvisLiveIn?.write(contentsOf: Data((line + "\n").utf8)) }
     }
     // JARVIS mode: talk over him. While he speaks in a hands-free chat (not while he asks for a yes/no or a choice), an
@@ -2882,12 +2931,13 @@ final class App: NSObject, WKScriptMessageHandler {
         request.requiresOnDeviceRecognition = true; request.shouldReportPartialResults = true; request.contextualStrings = ["Jarvis"]
         bargeRecognizer = recognizer; bargeRequest = request; bargeID += 1; let id = bargeID
         let heard = bargeHeard; heard.reset()
+        let speakers = !jarvisHeadphones()   // AirPods: any words of his cut in; speakers: only stop / wait / hold on / Jarvis
         bargeTask = recognizer.recognitionTask(with: request) { [weak self] result, error in
             DispatchQueue.main.async { [weak self] in
                 guard let self, bargeID == id else { return }
                 if let result {
                     let segments = result.bestTranscription.segments
-                    if let k = jarvisTalkOver(segments.map(\.substring), spoken: jarvisSaying) {
+                    if let k = jarvisTalkOver(segments.map(\.substring), spoken: jarvisSaying + " " + jarvisKokoroText(jarvisSaying), wordsOnly: speakers) {
                         NSLog("JARVIS talk-over: %@", result.bestTranscription.formattedString)
                         return talkedOver(from: segments[k].timestamp)
                     }
@@ -2927,10 +2977,12 @@ final class App: NSObject, WKScriptMessageHandler {
         jarvisCardListen()
     }
     static func jarvisYesNo(_ text: String) -> Bool? {   // nil: not a clear answer
-        let t = " " + text.lowercased().replacingOccurrences(of: "\u{2019}", with: "'").replacingOccurrences(of: #"[.,!?;:]"#, with: " ", options: .regularExpression)
+        let t = " " + text.lowercased().replacingOccurrences(of: "\u{2019}", with: "'").replacingOccurrences(of: #"[.,!?;:،؟]"#, with: " ", options: .regularExpression)
             .split(separator: " ").joined(separator: " ") + " "
-        let no = [" no ", " nope ", " don't ", " do not ", " cancel ", " stop ", " wait ", " never mind ", " hold on ", " not now ", " negative ", " abort "].contains { t.contains($0) }
-        let yes = [" yes ", " yeah ", " yep ", " yup ", " sure ", " go ahead ", " do it ", " proceed ", " allow ", " okay ", " ok ", " confirm ", " affirmative ", " go for it ", " absolutely ", " please do ", " fine "].contains { t.contains($0) }
+        let no = [" no ", " nope ", " don't ", " do not ", " cancel ", " stop ", " wait ", " never mind ", " hold on ", " not now ", " negative ", " abort ",
+                  " لا ", " لأ ", " لاء ", " مش ", " بلاش ", " استنى ", " la ", " la2 ", " laa ", " balash ", " estana "].contains { t.contains($0) }   // Egyptian Arabic, in Arabic script or Franco
+        let yes = [" yes ", " yeah ", " yep ", " yup ", " sure ", " go ahead ", " do it ", " proceed ", " allow ", " okay ", " ok ", " confirm ", " affirmative ", " go for it ", " absolutely ", " please do ", " fine ",
+                   " أيوه ", " ايوه ", " أيوة ", " ايوة ", " اه ", " آه ", " تمام ", " ماشي ", " اعمل ", " يلا ", " aywa ", " aiwa ", " ayouh ", " ayuwa ", " tamam ", " mashy ", " mashi ", " yalla "].contains { t.contains($0) }
         return yes == no ? nil : yes
     }
     func jarvisEndLive() { try? jarvisLiveIn?.close(); jarvisLiveIn = nil; jarvisLive = nil; jarvisVoiced = "" }   // the voice finishes what it has, then exits
@@ -9369,6 +9421,7 @@ Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in checkMic() }
 let app = App()
 Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in app.wakeTick() }
 Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in app.jarvisTimersTick() }   // JARVIS timers and alarms; returns at once when off
+Whisper.shared.isEcho = { jarvisSaid.echo($0) }
 Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { _ in app.jarvisOrdersTick() }   // JARVIS order news; returns at once when off or not due
 Timer.scheduledTimer(withTimeInterval: 1.0 / 30, repeats: true) { _ in app.jarvisTick() }   // JARVIS mode's face; returns at once when off
 let agentsUI = AgentPanels()

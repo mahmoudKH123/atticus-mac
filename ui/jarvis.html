@@ -84,8 +84,8 @@
   <div class="ccRow" data-k="cc" hidden><label>CC</label><div class="ccPeople"><input></div></div>
   <div class="ccRow" data-k="bcc" hidden><label>BCC</label><div class="ccPeople"><input></div></div>
   <div class="ccRow" data-k="subject"><label>Subject</label><input id="ccSubject" spellcheck="true"></div>
-  <div class="ccRow" style="flex:1"><textarea id="ccBody" spellcheck="true"></textarea></div>
-  <div class="ccRow"><label>Files</label><div id="ccFiles"><button class="ccBtn" id="ccAttach">+ Attach</button></div></div>
+  <div class="ccRow" data-k="body" style="flex:1"><textarea id="ccBody" spellcheck="true"></textarea></div>
+  <div class="ccRow" data-k="files"><label>Files</label><div id="ccFiles"><button class="ccBtn" id="ccAttach">+ Attach</button></div></div>
   <div id="ccFoot"><span id="ccMsg"></span><button class="ccBtn" id="ccCancel">Cancel</button><button class="ccBtn" id="ccSend">Send ⌘↵</button></div></div>
 <script>
 'use strict';
@@ -483,7 +483,7 @@ Object.assign(window.jarvis, {
 // The app gets {compose: 'send', draft} only from his own click or ⌘↵ (trusted events), {compose: 'cancel'} on Esc / ✕, {compose: 'attach'} for the file picker.
 const cc = document.getElementById('cc'), ccMsg = document.getElementById('ccMsg'), ccSendB = document.getElementById('ccSend');
 const ccSubject = document.getElementById('ccSubject'), ccBody = document.getElementById('ccBody'), ccFilesEl = document.getElementById('ccFiles');
-let ccPeopleList = [], ccState = { to: [], cc: [], bcc: [], files: [] }, ccSending = false, ccSuggest = { k: '', items: [], sel: -1 }, ccKind = 'email';
+let ccPeopleList = [], ccState = { to: [], cc: [], bcc: [], files: [] }, ccSending = false, ccSuggest = { k: '', items: [], sel: -1 }, ccKind = 'email', ccCallVia = 'phone', ccVideo = false;
 const ccPost = m => { try { window.webkit.messageHandlers.jarvis.postMessage(m); } catch (e) { console.log('compose', JSON.stringify(m)); } };
 const isEmail = v => /^[^\s@<>,;]+@[^\s@<>,;]+\.[^\s@<>,;]+$/.test(v);
 // texts: a phone in full international form; Egyptian 01x and 201x numbers get their +20 (Messages keeps chats under +20…)
@@ -508,7 +508,8 @@ function ccPlace() {
   const R = H * 0.35, cx = W / 2, fs = Math.max(13, Math.round(R * 0.036));
   const w = Math.min(Math.max(fs * 30, R * 1.3), W - 32), h = Math.min(H - 48, Math.max(fs * 30, R * 1.55));
   let x = cx - R * 1.3 - w; if (x < 24) x = (W - w) / 2;   // a narrow screen: the card sits over the globe
-  Object.assign(cc.style, { fontSize: fs + 'px', width: w + 'px', height: h + 'px', left: x + 'px', top: (H - h) / 2 + 'px' });
+  Object.assign(cc.style, { fontSize: fs + 'px', width: w + 'px', height: ccKind === 'call' ? 'auto' : h + 'px', left: x + 'px', top: (H - h) / 2 + 'px' });
+  if (ccKind === 'call') cc.style.top = (H - cc.offsetHeight) / 2 + 'px';   // a call card is just the person and the button
 }
 addEventListener('resize', ccPlace);
 function ccSize(n) { return n >= 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB'; }
@@ -543,8 +544,9 @@ function ccRender() {
     ccFilesEl.insertBefore(c, document.getElementById('ccAttach'));
   });
   const all = [...ccState.to, ...ccState.cc, ...ccState.bcc], bad = all.filter(r => !isAddr(r.v)), unsure = all.filter(r => isAddr(r.v) && !r.ok), big = ccKind === 'email' && total > 25 * 1048576;
-  ccSendB.disabled = ccSending || !all.length || bad.length > 0 || unsure.length > 0 || big;
-  if (!ccSending && !ccMsg.classList.contains('err')) ccMsg.textContent = big ? 'Over Gmail’s 25 MB' : bad.length ? `Pick or fix ${bad.length === 1 ? 'the name' : bad.length + ' names'} in red`
+  const many = ccKind === 'call' && all.length > 1;   // a call is to one person
+  ccSendB.disabled = ccSending || !all.length || bad.length > 0 || unsure.length > 0 || big || many;
+  if (!ccSending && !ccMsg.classList.contains('err')) ccMsg.textContent = big ? 'Over Gmail’s 25 MB' : many ? 'One person per call: remove the others' : bad.length ? `Pick or fix ${bad.length === 1 ? 'the name' : bad.length + ' names'} in red`
     : unsure.length ? `Confirm ${unsure.length === 1 ? 'the person' : 'each person'}: click ${unsure.length === 1 ? 'it' : 'them'} or say yes` : !all.length ? 'Who is it to?' : '';
 }
 function ccCommit(k) {   // what is typed in a To/CC/BCC box becomes chips
@@ -580,13 +582,13 @@ function ccPick(k, i) {   // picked from the list by him: confirmed
 function ccDraft() {
   for (const k of ['to', 'cc', 'bcc']) { const input = ccRow(k).querySelector('input'); if (input.value.trim()) ccCommit(k); }
   const vals = k => ccState[k].map(r => r.v || r.heard), all = [...ccState.to, ...ccState.cc, ...ccState.bcc];
-  return { kind: ccKind, to: vals('to'), cc: vals('cc'), bcc: vals('bcc'), subject: ccSubject.value, body: ccBody.value, files: ccState.files.slice(),
+  return { kind: ccKind, via: ccCallVia, video: ccVideo, to: vals('to'), cc: vals('cc'), bcc: vals('bcc'), subject: ccSubject.value, body: ccBody.value, files: ccState.files.slice(),
            confirmed: all.filter(r => r.ok && r.v).map(r => ({ name: r.name, heard: r.heard, v: r.v })), unconfirmed: all.filter(r => !r.ok).map(r => r.name || r.heard || r.v) };
 }
 function ccSend(e) {
   if (!e || !e.isTrusted || !cc.classList.contains('on') || ccSending) return;   // only his own click or key, never a script
   const d = ccDraft(); ccRender(); if (ccSendB.disabled) return;
-  ccSending = true; ccMsg.classList.remove('err'); ccMsg.textContent = 'Sending…'; ccSendB.disabled = true; ccPost({ compose: 'send', draft: d });
+  ccSending = true; ccMsg.classList.remove('err'); ccMsg.textContent = ccKind === 'call' ? 'Calling…' : 'Sending…'; ccSendB.disabled = true; ccPost({ compose: 'send', draft: d });
 }
 function ccCancel() { if (!cc.classList.contains('on') || ccSending) return; ccPost({ compose: 'cancel' }); jarvis.composeClose(); }
 for (const k of ['to', 'cc', 'bcc']) {
@@ -616,16 +618,20 @@ Object.assign(window.jarvis, {
     o = o || {}; if (Array.isArray(o.people)) ccPeopleList = o.people;
     const d = o.draft; ccSending = false; ccMsg.classList.remove('err'); ccMsg.textContent = '';
     if (d) {   // a fresh or AI-updated draft; null keeps what is on the card (he may have typed)
-      ccKind = ['sms', 'whatsapp'].includes(d.kind) ? d.kind : 'email';
-      document.getElementById('ccTitle').textContent = ccKind === 'whatsapp' ? 'WHATSAPP' : ccKind !== 'email' ? 'MESSAGE' : 'EMAIL';
-      document.getElementById('ccVia').textContent = ccKind === 'whatsapp' ? 'via WhatsApp' : ccKind !== 'email' ? 'via Messages · iMessage or SMS' : 'via Apple Mail · Gmail';
+      ccKind = ['sms', 'whatsapp', 'call'].includes(d.kind) ? d.kind : 'email';
+      ccCallVia = d.via === 'whatsapp' ? 'whatsapp' : 'phone'; ccVideo = !!d.video;
+      const call = ccKind === 'call', wa = call && ccCallVia === 'whatsapp';
+      document.getElementById('ccTitle').textContent = call ? (wa ? 'WHATSAPP ' : '') + (ccVideo ? 'VIDEO CALL' : 'CALL') : ccKind === 'whatsapp' ? 'WHATSAPP' : ccKind !== 'email' ? 'MESSAGE' : 'EMAIL';
+      document.getElementById('ccVia').textContent = call ? (wa ? 'via WhatsApp' : ccVideo ? 'via FaceTime video' : 'via FaceTime audio or your iPhone')
+        : ccKind === 'whatsapp' ? 'via WhatsApp' : ccKind !== 'email' ? 'via Messages · iMessage or SMS' : 'via Apple Mail · Gmail';
       ccRow('subject').hidden = ccKind !== 'email'; document.getElementById('ccMore').hidden = ccKind !== 'email';
+      ccRow('body').hidden = call; ccRow('files').hidden = call; ccSendB.textContent = call ? 'Call ⌘↵' : 'Send ⌘↵';
       for (const k of ['to', 'cc', 'bcc']) { ccState[k] = (d[k] || []).map(v => ccResolve(v)); ccState[k].forEach(r => r.ok = false); ccRow(k).querySelector('input').value = ''; }   // what JARVIS heard is never pre-confirmed
       ccRow('cc').hidden = ccKind !== 'email' || !ccState.cc.length; ccRow('bcc').hidden = ccKind !== 'email' || !ccState.bcc.length;
       ccSubject.value = d.subject || ''; ccBody.value = d.body || ''; ccState.files = Array.isArray(d.files) ? d.files.slice() : [];
     }
     ccCloseSuggest(); ccRender(); ccPlace(); cc.classList.add('on');
-    setTimeout(() => { if (!ccState.to.length) ccRow('to').querySelector('input').focus(); else if (!ccBody.value) ccBody.focus(); }, 80);
+    setTimeout(() => { if (!ccState.to.length) ccRow('to').querySelector('input').focus(); else if (!ccBody.value && ccKind !== 'call') ccBody.focus(); }, 80);
   },
   composeClose() { cc.classList.remove('on'); ccSending = false; ccCloseSuggest(); document.activeElement && document.activeElement.blur(); },
   composeNow() { return JSON.stringify(ccDraft()); },

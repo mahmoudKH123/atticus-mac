@@ -1052,6 +1052,91 @@ enum JarvisWhatsApp {
         }
     }
 }
+// JARVIS compose card, calls: one person, placed only from the card's Call (his click or ⌘↵). Phone: FaceTime audio when he already
+// has an iMessage chat with that number (an Apple user), else a cell call through his iPhone (tel:); video is always FaceTime.
+// WhatsApp: open that number's chat, wait until its header is that person (never the chat that was open before), press its call button.
+enum JarvisCall {
+    static func imessage(_ number: String) -> Bool {
+        let script = """
+        on run argv
+            set num to item 1 of argv
+            tell application "Messages"
+                repeat with cid in {"any;-;" & num, "iMessage;-;" & num}
+                    try
+                        if exists chat id cid then
+                            if (service type of account of chat id cid) is iMessage then return "yes"
+                        end if
+                    end try
+                end repeat
+            end tell
+            return "no"
+        end run
+        """
+        let p = Process(), out = Pipe(); p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript"); p.arguments = ["-e", script, number]
+        p.standardOutput = out; p.standardError = Pipe()
+        guard (try? p.run()) != nil else { return false }
+        let killer = DispatchWorkItem { if p.isRunning { p.terminate() } }; DispatchQueue.global().asyncAfter(deadline: .now() + 10, execute: killer)
+        p.waitUntilExit(); killer.cancel()
+        return String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines) == "yes"
+    }
+    static func same(_ header: String, _ name: String, _ number: String) -> Bool {   // WhatsApp's chat title is this person: their name or their number
+        let h = JarvisWhatsApp.clean(header).lowercased(), digits = header.filter(\.isNumber)
+        return (!name.isEmpty && h == JarvisWhatsApp.clean(name).lowercased()) || (digits.count >= 8 && number.hasSuffix(String(digits.suffix(9))))
+    }
+    static func ids(_ pid: pid_t) -> [String: AXUIElement] {   // the chat header's buttons by their WhatsApp identifiers
+        var out: [String: AXUIElement] = [:], budget = 4000
+        func walk(_ e: AXUIElement, _ d: Int) {
+            budget -= 1; guard budget > 0, d < 40 else { return }
+            if let id = JarvisWhatsApp.attr(e, kAXIdentifierAttribute) as? String, id.hasPrefix("NavigationBar_") { out[id] = e }
+            for c in JarvisWhatsApp.attr(e, kAXChildrenAttribute) as? [AXUIElement] ?? [] { walk(c, d + 1) }
+        }
+        for w in JarvisWhatsApp.attr(AXUIElementCreateApplication(pid), kAXWindowsAttribute) as? [AXUIElement] ?? [] { walk(w, 0) }
+        return out
+    }
+    static func whatsapp(_ number: String, _ name: String, _ video: Bool) -> String? {
+        let header = { (pid: pid_t) in JarvisWhatsApp.attr(ids(pid)["NavigationBar_HeaderViewButton"] ?? AXUIElementCreateApplication(pid), kAXDescriptionAttribute) as? String ?? "" }
+        let before = NSRunningApplication.runningApplications(withBundleIdentifier: JarvisWhatsApp.bundle).first.map { header($0.processIdentifier) } ?? ""
+        var c = URLComponents(string: "whatsapp://send")!; c.queryItems = [.init(name: "phone", value: String(number.dropFirst()))]
+        guard let url = c.url, NSWorkspace.shared.open(url) else { return "WhatsApp didn't open" }
+        let start = Date(), deadline = start.addingTimeInterval(15), want = video ? "NavigationBar_VideoCallButton" : "NavigationBar_CallButton"
+        while Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.3)
+            guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: JarvisWhatsApp.bundle).first else { continue }
+            let pid = app.processIdentifier
+            for w in JarvisWhatsApp.attr(AXUIElementCreateApplication(pid), kAXWindowsAttribute) as? [AXUIElement] ?? [] {
+                var budget = 3000
+                if JarvisWhatsApp.find(w, budget: &budget, { e, role in role == "AXStaticText" && JarvisWhatsApp.text(e).contains("isn't on WhatsApp") }) != nil {
+                    var b2 = 3000
+                    if let ok = JarvisWhatsApp.find(w, budget: &b2, { e, role in role == "AXButton" && JarvisWhatsApp.clean(JarvisWhatsApp.text(e)) == "OK" }) { AXUIElementPerformAction(ok, kAXPressAction as CFString) }
+                    return "That number isn't on WhatsApp"
+                }
+            }
+            guard Date().timeIntervalSince(start) > 1.0 else { continue }   // give WhatsApp time to switch chats
+            let found = ids(pid), title = JarvisWhatsApp.attr(found["NavigationBar_HeaderViewButton"] ?? AXUIElementCreateApplication(pid), kAXDescriptionAttribute) as? String ?? ""
+            guard let button = found[want], same(title, name, number) || (!title.isEmpty && title != before) else { continue }
+            app.activate()
+            return AXUIElementPerformAction(button, kAXPressAction as CFString) == .success ? nil : "Press the call button in WhatsApp"
+        }
+        return "The chat is open: press the call button in WhatsApp"
+    }
+    static func place(_ d: [String: Any], done: @escaping (String?, String) -> Void) {
+        let numbers = (d["to"] as? [String] ?? []).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        guard numbers.count == 1, let number = numbers.first, number.range(of: #"^\+\d{8,15}$"#, options: .regularExpression) != nil else { return done("One number per call", "") }
+        let video = d["video"] as? Bool ?? false, viaWhatsApp = (d["via"] as? String) == "whatsapp"
+        let name = ((d["confirmed"] as? [[String: Any]])?.first?["name"] as? String) ?? ""
+        if viaWhatsApp, !AXIsProcessTrusted() { return done("Atticus needs Accessibility to press call in WhatsApp", "") }
+        DispatchQueue.global(qos: .userInitiated).async {
+            var error: String?, how: String
+            if viaWhatsApp { how = video ? "whatsapp-video" : "whatsapp"; error = whatsapp(number, name, video) }
+            else {
+                how = video ? "facetime" : imessage(number) ? "facetime-audio" : "tel"
+                if let url = URL(string: how + "://" + number), NSWorkspace.shared.open(url) {} else { error = "FaceTime didn't open" }
+            }
+            if error != nil { NSLog("JARVIS call: not placed (%@, %@)", how, error!) }
+            DispatchQueue.main.async { done(error, how) }
+        }
+    }
+}
 // JARVIS mode: who he actually talks to, for picking the right "Sama" and as speech hints. Read every 30 min from the chats he has
 // open: WhatsApp's chat list (only when WhatsApp is already running) and Messages' recent one-to-one chats. Names only, newest first.
 enum JarvisPeople {
@@ -3158,6 +3243,16 @@ final class App: NSObject, WKScriptMessageHandler {
         case "send":
             guard let draft else { return face.composeError("Nothing to send") }
             let kind = draft["kind"] as? String ?? "email"
+            if kind == "call" {
+                return JarvisCall.place(draft) { [weak self] error, how in
+                    guard let self else { return }
+                    if let error { return self.face.composeError(error) }
+                    if let data = try? JSONSerialization.data(withJSONObject: draft) {   // who he confirmed, for atticus.py to learn names from
+                        try? data.write(to: URL(fileURLWithPath: (Prefs.path as NSString).deletingLastPathComponent + "/compose-now.json"), options: .atomic)
+                    }
+                    self.composeSentAt = Date(); self.face.composeClose(); self.answerCompose("called: " + how)
+                }
+            }
             (kind == "whatsapp" ? JarvisWhatsApp.send : kind == "sms" ? JarvisMessages.send : JarvisMail.send)(draft) { [weak self] error in
                 guard let self else { return }
                 if let error { return self.face.composeError(error) }

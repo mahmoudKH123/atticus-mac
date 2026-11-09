@@ -580,7 +580,12 @@ class JarvisResponsivenessTests(unittest.TestCase):
         self.assertEqual((draft['to'], draft['cc'], draft['bcc'], draft['subject']), (['Ahmed', 'a@b.co'], ['c@d.co'], [], 'Hi'))
         self.assertEqual(draft['files'], [{'path': f, 'name': 'report.pdf', 'size': 2048}])
         self.assertEqual(problems, [f'No such file: {os.path.join(d, "gone.pdf")}'])
-        self.assertIn('Only email, sms and whatsapp', ' '.join(atticus.compose_draft({'kind': 'fax'})[1]))
+        self.assertIn('Only email, sms, whatsapp and call', ' '.join(atticus.compose_draft({'kind': 'fax'})[1]))
+        call, problems = atticus.compose_draft({'kind': 'call', 'via': 'WhatsApp', 'video': 1, 'to': ['Sama', 'Omar'], 'body': 'x', 'files': ['/etc/hosts']})
+        self.assertEqual((call['kind'], call['via'], call['video'], call['to'], call['body'], call['files'], problems), ('call', 'whatsapp', True, ['Sama'], '', [], []))   # one person, nothing written
+        self.assertEqual(atticus.compose_draft({'kind': 'call', 'to': ['+201012345678']})[0]['via'], 'phone')
+        swift = open(os.path.join(os.path.dirname(__file__), '..', 'Atticus.swift')).read()
+        self.assertIn('kind == "call"', swift); self.assertIn('NavigationBar_CallButton', swift); self.assertIn('NavigationBar_VideoCallButton', swift)   # only the card's Call places it
         sms, problems = atticus.compose_draft({'kind': 'sms', 'to': ['Ahmed'], 'cc': ['x@y.co'], 'subject': 'S', 'body': 'Running late'})
         self.assertEqual((sms['kind'], sms['to'], sms['cc'], sms['subject'], sms['body'], problems), ('sms', ['Ahmed'], [], '', 'Running late', []))
         with patch.dict(os.environ, {'ATTICUS_ASK': d}):
@@ -639,7 +644,7 @@ class JarvisResponsivenessTests(unittest.TestCase):
             self.assertEqual(json.load(open(names)), {'summer': 'Sama Rostom'}); self.assertEqual(json.load(open(sent)), {'Sama Rostom': 1})
             self.assertEqual(atticus.resolve_person('Summer', 'whatsapp', people)['name'], 'Sama Rostom')   # what he confirmed wins next time
         app = self.source(); page = open(os.path.join(os.path.dirname(__file__), '..', 'ui', 'jarvis.html')).read()
-        self.assertIn("ccSendB.disabled = ccSending || !all.length || bad.length > 0 || unsure.length > 0 || big;", page)   # Send waits for every person
+        self.assertIn("ccSendB.disabled = ccSending || !all.length || bad.length > 0 || unsure.length > 0 || big || many;", page)   # Send waits for every person
         self.assertIn("ccState[k].forEach(r => r.ok = false);", page)   # nothing JARVIS heard is pre-confirmed
         self.assertIn('if Self.jarvisYesNo(heard) == true { face.run("jarvis.composeConfirm()"); return jarvisCardListen() }', app)
         self.assertIn('jarvisSpeakLive(ask, track: false); jarvisEndLive() }   // "To Sama, sir?"', app)

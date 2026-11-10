@@ -602,7 +602,7 @@ RISKY = [('Delete something?', r'\b(rm|rmdir|srm|unlink|shred|trash|mv)\s|\bdele
 RISKY_LABEL = r"(?i)\b(buy|purchase|pay|payment|checkout|order|send|delete|remove|trash|submit|publish|post|sign.?out|log.?out|unsubscribe|subscribe|transfer|bid|erase|withdraw|donate|authorize|grant access|allow access|logout|book|reserve|merge|deploy|discard|wipe|format|apply(?! filters| changes| settings| coupon| code| promo| discount| theme| style| formatting)|confirm)\b"
 RUNS = ('.command', '.tool', '.terminal', '.sh', '.zsh', '.bash', '.app', '.workflow', '.action')   # macOS runs these when opened
 APP_DIRS = ('/Applications/', '/System/Applications/', os.path.join(HOME, 'Applications') + '/')
-QUIET = (DRAW, SEARCH, READ, LOOK, FRONT, SHOW, PLACE, PLAY, QUEUE, TYPE, REMEMBER, FORGET, ABOUT, PICK, SET, WEB, HISTORY, HANDS, WINDOW, f'{shlex.quote(ME)} --calendar ', f'{shlex.quote(ME)} --reminders ', f'{shlex.quote(ME)} --mac ', f'{shlex.quote(ME)} --timer ', f'{shlex.quote(ME)} --mail ', f'{shlex.quote(ME)} --shop ', f'{shlex.quote(ME)} --whatsapp ', f'{shlex.quote(ME)} --typein ', f'{shlex.quote(ME)} --heard ', f'{shlex.quote(ME)} --compose ', 'open ', 'mdfind ', 'pbpaste')   # helpers confirm their own risky actions
+QUIET = (DRAW, SEARCH, READ, LOOK, FRONT, SHOW, PLACE, PLAY, QUEUE, TYPE, REMEMBER, FORGET, ABOUT, PICK, SET, WEB, HISTORY, HANDS, WINDOW, f'{shlex.quote(ME)} --calendar ', f'{shlex.quote(ME)} --reminders ', f'{shlex.quote(ME)} --mac ', f'{shlex.quote(ME)} --timer ', f'{shlex.quote(ME)} --mail ', f'{shlex.quote(ME)} --shop ', f'{shlex.quote(ME)} --whatsapp ', f'{shlex.quote(ME)} --typein ', f'{shlex.quote(ME)} --heard ', f'{shlex.quote(ME)} --talk ', f'{shlex.quote(ME)} --compose ', 'open ', 'mdfind ', 'pbpaste')   # helpers confirm their own risky actions
 
 
 def launches_program(part):
@@ -2188,6 +2188,11 @@ def fast(text):
     if site and app_named(site[1]): site = m = None
     query = m[2] if site else m[1] if m else ''
     if query and not DEICTIC.search(query) and not MORE.search(query) and not re.search(r'\b(for|the|a|an|and|to|of|some)$', query):
+        if site and site[1] in SHOPS and pref('jarvis', False):   # JARVIS mode: a shop he names opens on its own Egyptian site, and the step shows as a card
+            say('▸', f'Searching {SHOPS[site[1]][0]} for {query}')
+            if not shop_tool([query, site[1]]).startswith('Opened '): return None
+            fast.cmds = [f'{shlex.quote(ME)} --shop {shlex.quote(query)} {site[1]}']
+            return f'Searched {query} on {site[1]}.'
         target = ('https://duckduckgo.com/?q=' + urllib.parse.quote_plus('!' + site[1] + ' ' + query, safe='!') if site else
                   'https://www.google.com/search?q=' + urllib.parse.quote(query))
         if not str(show(target, bg=True)).startswith('opened '):
@@ -5406,7 +5411,7 @@ def agents_service():
     finally: manager.close()
 
 
-JARVIS_TOOLS = f"\nReminders (any language): {shlex.quote(ME)} --reminders --help for JSON list/add/edit/complete/delete; always use it, never AppleScript.\nMac controls: {shlex.quote(ME)} --mac --help (volume, mute, brightness, dark mode, Wi-Fi, Bluetooth, airplane mode, Do Not Disturb, screenshot, lock, screen off, status); use it for these.\nTimers and alarms: {shlex.quote(ME)} --timer --help; use it, never sleep or AppleScript.\nOther Mac settings: open x-apple.systempreferences:<page id>, then {HANDS}; every change there asks him first. Security and privacy pages, sudo and security commands are blocked: open the page and let him change it.\nEmail (his personal Gmail): {shlex.quote(ME)} --mail '<what he wants, in plain words>'; it reads, searches, summarises and saves drafts, never sends. Do email yourself, here, never as a background agent. To write one: {shlex.quote(ME)} --compose '{{\"to\":[\"<address or contact name>\"],\"cc\":[],\"bcc\":[],\"subject\":\"...\",\"body\":\"...\",\"files\":[\"<full path>\"]}}' and say nothing before it: the card asks him aloud to confirm who it's to. Pass names exactly as you heard them, never decide who someone is yourself: the card matches his contacts by sound and he confirms every person. Write the subject and body yourself from what he said, in his voice; find files with mdfind or ls first. It shows every field on a card; he edits it by typing or voice and presses Send himself (only his click sends; you never can). Unknown address: put the contact name, the card suggests his contacts. Texts (SMS or iMessage): the same card with \"kind\":\"sms\", \"to\" = phone numbers or contact names, \"body\", optional \"files\" (photos, PDFs); it goes through Messages on his click. When --compose says Sent, it really went out by his own click: say so plainly and never doubt it later. Use --mail only when he asks for a draft.\nOrders and deliveries (any shop): {shlex.quote(ME)} --orders gives his current orders from Gmail; answer from it in a sentence or two.\nLanguage: he may speak Egyptian Arabic or mix it with English, in Arabic script or transliterated (\"eftah Spotify\", \"fakkarni bokra\"); understand it and always answer in English. Speech recognition may write English words in Arabic letters (\"سبوتيفاي\" = Spotify).\nWhatsApp: the same card with \"kind\":\"whatsapp\", \"to\" = contact names or phone numbers, \"body\", optional \"files\". Tidy what he said into a short, casual message in his own voice and in the language he used (\"tell Ahmed I'm running late\" -> \"Running a bit late, sorry!\"). He presses Send on the card and it goes through WhatsApp. 'Message' or 'text' with no app named = sms; 'WhatsApp' named = whatsapp. Calls: the same card with \"kind\":\"call\", \"to\" = one contact name or number, \"video\": true for video, \"via\":\"whatsapp\" when he names WhatsApp (else it goes by FaceTime or his iPhone). Say nothing before it; he confirms the person and presses Call himself. To only open a chat with text typed: {shlex.quote(ME)} --whatsapp '<name>' '<message>'.\nTyping: when you need something exact (an email address, phone number, URL, spelling of a name, a code or reference) and he hasn't spelled it clearly, or he says 'let me type it', run {shlex.quote(ME)} --typein '<short label, e.g. Email address>' [email|phone|url|text] after one short spoken line ('Type the address, sir.'); it waits while he types (his contacts are suggested) and prints exactly what he typed. Use that text exactly. Never for passwords, PINs or codes sent to him.\nHearing: when he corrects a word you misheard ('no, I said email', 'I meant Westcon'), run {shlex.quote(ME)} --heard '<every wrong word, copied exactly from his earlier ask (\"tracked her\", not \"tracked\")>' '<what he meant>', then do what he meant. Only for real mishearings, never for a change of mind. 'What have you learned' about hearing: --heard --list; 'forget that': --heard --forget '<words>'.\nShopping: one step, no browsing: {shlex.quote(ME)} --shop '<short search phrase>' [shops] [--cheapest when he wants the cheapest]. Shops: the one he names, else the right ones for the item (default amazon noon jumia; add 2b for electronics, ikea for furniture and home, carrefour for groceries; aliexpress or temu only if he says cheap or from abroad). Then a few words ('Amazon, Noon and Jumia are up, sir.') and stop: he takes it from there. Never read options, add to cart or check out unless he asks; never type card numbers or passwords; the final buy button is always his."
+JARVIS_TOOLS = f"\nReminders (any language): {shlex.quote(ME)} --reminders --help for JSON list/add/edit/complete/delete; always use it, never AppleScript.\nMac controls: {shlex.quote(ME)} --mac --help (volume, mute, brightness, dark mode, Wi-Fi, Bluetooth, airplane mode, Do Not Disturb, screenshot, lock, screen off, status); use it for these.\nTimers and alarms: {shlex.quote(ME)} --timer --help; use it, never sleep or AppleScript.\nOther Mac settings: open x-apple.systempreferences:<page id>, then {HANDS}; every change there asks him first. Security and privacy pages, sudo and security commands are blocked: open the page and let him change it.\nEmail (his personal Gmail): {shlex.quote(ME)} --mail '<what he wants, in plain words>'; it reads, searches, summarises and saves drafts, never sends. Do email yourself, here, never as a background agent. To write one: {shlex.quote(ME)} --compose '{{\"to\":[\"<address or contact name>\"],\"cc\":[],\"bcc\":[],\"subject\":\"...\",\"body\":\"...\",\"files\":[\"<full path>\"]}}' and say nothing before it: the card asks him aloud to confirm who it's to. Pass names exactly as you heard them, never decide who someone is yourself: the card matches his contacts by sound and he confirms every person. Write the subject and body yourself from what he said, in his voice; find files with mdfind or ls first. It shows every field on a card; he edits it by typing or voice and presses Send himself (only his click sends; you never can). Unknown address: put the contact name, the card suggests his contacts. Texts (SMS or iMessage): the same card with \"kind\":\"sms\", \"to\" = phone numbers or contact names, \"body\", optional \"files\" (photos, PDFs); it goes through Messages on his click. When --compose says Sent, it really went out by his own click: say so plainly and never doubt it later. Use --mail only when he asks for a draft.\nOrders and deliveries (any shop): {shlex.quote(ME)} --orders gives his current orders from Gmail; answer from it in a sentence or two.\nLanguage: he may speak Egyptian Arabic or mix it with English, in Arabic script or transliterated (\"eftah Spotify\", \"fakkarni bokra\"); understand it and always answer in English. Speech recognition may write English words in Arabic letters (\"سبوتيفاي\" = Spotify).\nWhatsApp: the same card with \"kind\":\"whatsapp\", \"to\" = contact names or phone numbers, \"body\", optional \"files\". Tidy what he said into a short, casual message in his own voice and in the language he used (\"tell Ahmed I'm running late\" -> \"Running a bit late, sorry!\"). He presses Send on the card and it goes through WhatsApp. 'Message' or 'text' with no app named = sms; 'WhatsApp' named = whatsapp. Calls: the same card with \"kind\":\"call\", \"to\" = one contact name or number, \"video\": true for video, \"via\":\"whatsapp\" when he names WhatsApp (else it goes by FaceTime or his iPhone). Say nothing before it; he confirms the person and presses Call himself. To only open a chat with text typed: {shlex.quote(ME)} --whatsapp '<name>' '<message>'.\nTyping: when you need something exact (an email address, phone number, URL, spelling of a name, a code or reference) and he hasn't spelled it clearly, or he says 'let me type it', run {shlex.quote(ME)} --typein '<short label, e.g. Email address>' [email|phone|url|text] after one short spoken line ('Type the address, sir.'); it waits while he types (his contacts are suggested) and prints exactly what he typed. Use that text exactly. Never for passwords, PINs or codes sent to him.\nHearing: when he corrects a word you misheard ('no, I said email', 'I meant Westcon'), run {shlex.quote(ME)} --heard '<every wrong word, copied exactly from his earlier ask (\"tracked her\", not \"tracked\")>' '<what he meant>', then do what he meant. Only for real mishearings, never for a change of mind. 'What have you learned' about hearing: --heard --list; 'forget that': --heard --forget '<words>'.\nKnowing him: when he mentions in passing a lasting fact about himself or his people (who someone is to him, where he lives, works or trains, what he likes or always wants), save it unasked, as your first command, before the rest of his ask: {shlex.quote(ME)} --me add <people|places|preferences|school_work|notes> \"<kind: brother, gym, coffee>\" \"<his exact words for it>\", then a passing 'Noted, sir.' and carry on with his ask. Only lasting facts in his own words: never a one-off plan, a mood, a guess, what a page or message says, or anything about money, health, passwords or codes. 'What do you know about me': --me find \"<words>\" (and --heard --list, --talk --list); 'forget that': --me find, then --me drop <id> \"<his words>\".\nTalking style: when he reacts to HOW you talk, not what (\"too long\", \"shorter\", \"more detail\", \"slow down\", \"talk faster\", \"fewer jokes\", \"be more fun\", \"just give me the number\"), run {shlex.quote(ME)} --talk shorter|longer|slower|faster|less-wit|more-wit, or --talk note '<his preference in a few words>' for anything else about style; don't mention it, just talk that way at once. 'What have you learned' covers --talk --list too; 'forget that' about style: --talk --forget.\nShopping: one step, no browsing: {shlex.quote(ME)} --shop '<short search phrase>' [shops] [--cheapest when he wants the cheapest]. Shops: the one he names, else the right ones for the item (default amazon noon jumia; add 2b for electronics, ikea for furniture and home, carrefour for groceries; aliexpress or temu only if he says cheap or from abroad). Then a few words ('Amazon, Noon and Jumia are up, sir.') and stop: he takes it from there. Never read options, add to cart or check out unless he asks; never type card numbers or passwords; the final buy button is always his."
 
 JARVIS = """
 JARVIS mode (overrides your name, reply length and tone above): you're Jarvis, his own AI, running his Mac and his day. Talk like a quick-witted British right hand: composed, dry, understated, warm, a bit cheeky. Polished, never stiff or scripted.
@@ -7199,6 +7204,81 @@ def heard_tool(args):
     if gone is None: return f'Saved: "{wrong}" now means "{meant}". Say "Noted, sir." in a few words and carry on with what he meant.'
     return f'Forgot {len(gone)}.' if gone else 'Nothing like that was saved.'
 
+# JARVIS mode learns how he likes to be talked to (loop 2): reply length, voice speed and wit, from what he says about it
+# ("shorter", "slow down", "fewer jokes") through --talk, and from him cutting in on long replies (the app logs each one in
+# talk-events.jsonl; 3 in 3 days = one step shorter). Notes only, never code; it changes how JARVIS talks, never what it may do.
+TALK, TALK_EVENTS = os.path.join(DIR, 'talk.json'), os.path.join(DIR, 'talk-events.jsonl')
+TALK_STEPS = {'shorter': ('length', -1), 'longer': ('length', 1), 'slower': ('speed', -1), 'faster': ('speed', 1), 'less-wit': ('wit', -1), 'more-wit': ('wit', 1)}
+TALK_LENGTH = {-2: 'He wants it very short: one sentence, under 12 words, unless he asks for detail.', -1: 'He likes it short: one sentence, two only when needed.',
+               1: 'He likes a little more: two sentences is fine, three or four for a rundown.', 2: 'He likes fuller answers: up to three sentences, five for a rundown.'}
+TALK_WIT = {-2: 'Leave the humour out: plain and polite.', -1: 'Humour only now and then; mostly plain.',
+            1: 'A bit more dry wit is welcome.', 2: 'Lean into the wit: a dry remark in most replies (never when something failed).'}
+
+def talk_rows():
+    t = read_json(TALK, {})
+    t = {k: t.get(k) for k in ('length', 'speed', 'wit', 'notes', 'seen', 'why')}
+    for k in ('length', 'speed', 'wit'): t[k] = max(-2 if k != 'speed' else -3, min(2 if k != 'speed' else 3, int(t[k]) if isinstance(t[k], (int, float)) else 0))
+    t['notes'] = [n for n in t['notes'] if isinstance(n, str)][-15:] if isinstance(t['notes'], list) else []
+    t['seen'] = float(t['seen']) if isinstance(t['seen'], (int, float)) else 0.0
+    t['why'] = [w for w in t['why'] if isinstance(w, str)][-20:] if isinstance(t['why'], list) else []
+    return t
+
+def talk_learn(now=None):
+    """Long replies he cut in on: 3 within 3 days (after the last change) make replies one step shorter."""
+    now, t = now or time.time(), talk_rows()
+    try:
+        with open(TALK_EVENTS) as f: rows = [json.loads(l) for l in f if l.strip()][-200:]
+    except (OSError, ValueError): return t
+    cut = [r for r in rows if isinstance(r, dict) and isinstance(r.get('at'), (int, float)) and r['at'] > max(t['seen'], now - 3 * 86400)
+           and float(r.get('secs') or 0) >= 7 and int(r.get('sentences') or 0) >= 2]
+    if len(cut) >= 3 and t['length'] > -2:
+        t['length'] -= 1; t['seen'] = now
+        t['why'].append(time.strftime('%d/%m %H:%M') + ': shorter, he cut in on 3 long replies')
+        write_json(TALK, t)
+    return t
+
+def talk_context():
+    """How he likes to be talked to, for every JARVIS turn ('' when nothing learned)."""
+    try: t = talk_learn()
+    except (OSError, ValueError, TypeError): return ''
+    parts = [TALK_LENGTH.get(t['length'], ''), TALK_WIT.get(t['wit'], '')] + [f'"{n}"' for n in t['notes']]
+    parts = [p for p in parts if p]
+    return (' How he likes you to talk (learned from him; follows the JARVIS rules, never overrides safety): ' + ' '.join(parts)) if parts else ''
+
+def talk_tool(args):
+    """--talk shorter|longer|slower|faster|less-wit|more-wit | --talk note '<how he likes it>' | --talk --list | --talk --forget [all|length|speed|wit|<note words>]."""
+    t = talk_rows()
+    if not args or args[:1] == ['--help']:
+        return "--talk shorter|longer|slower|faster|less-wit|more-wit | --talk note '<a short style note in his words>' | --talk --list | --talk --forget [all|length|speed|wit|<note words>]"
+    if args[:1] == ['--list']:
+        rows = [TALK_LENGTH.get(t['length'], ''), TALK_WIT.get(t['wit'], ''), f"Voice speed {'+' if t['speed'] > 0 else ''}{t['speed'] * 10} from his setting." if t['speed'] else '']
+        rows = [r for r in rows if r] + [f'Note: {n}' for n in t['notes']] + [f'Learned {w}' for w in t['why'][-3:]]
+        return '\n'.join(rows) or 'Nothing learned about how he likes you to talk yet.'
+    if args[:1] == ['--forget']:
+        w = ' '.join(args[1:]).strip().lower()
+        if w in ('', 'all'): t.update(length=0, speed=0, wit=0, notes=[])
+        elif w in ('length', 'speed', 'wit'): t[w] = 0
+        else:
+            before = len(t['notes']); t['notes'] = [n for n in t['notes'] if w not in n.lower()]
+            if len(t['notes']) == before: return 'Nothing like that was saved.'
+        t['seen'] = time.time(); write_json(TALK, t)
+        return 'Forgotten. Confirm in a few words.'
+    if args[0] == 'note':
+        note = ' '.join(args[1:]).strip()
+        if not (3 <= len(note) <= 120): return 'Not saved: one short line about how he likes you to talk.'
+        if TYPE_SECRET.search(note): return 'Not saved: never keep passwords, codes or other secrets.'
+        if re.search(r'(?i)\b(send|buy|purchase|pay|delete|without (asking|confirm)|skip|approv|allow|permission)', note):
+            return 'Not saved: style notes are about how you talk, never what you may do.'
+        t['notes'] = [n for n in t['notes'] if n.lower() != note.lower()] + [note]
+    elif args[0] in TALK_STEPS:
+        k, step = TALK_STEPS[args[0]]; lim = 3 if k == 'speed' else 2
+        t[k] = max(-lim, min(lim, t[k] + step))
+    else: return talk_tool(['--help'])
+    t['seen'] = time.time()   # interruptions before a change he asked for don't count again
+    t['why'].append(time.strftime('%d/%m %H:%M') + ': ' + ' '.join(args)[:80])
+    write_json(TALK, t)
+    return 'Saved. Do not mention it: just talk that way from your very next words.'
+
 # JARVIS mode shops up to the checkout page and stops: the button that completes a purchase is always his to press, even after a spoken yes.
 JARVIS_BUY = (r"(?i)\b(?:place (?:your |the |my )?order|buy now|buy with 1-click|1-click|pay|complete (?:your |the )?(?:purchase|order|payment)|"
               r"confirm (?:and pay|(?:your |the )?(?:order|purchase|payment))|submit (?:your |the )?order|order now|checkout and pay|proceed to pay(?:ment)?|make payment)\b|"
@@ -7213,7 +7293,7 @@ TYPE_KINDS = ('email', 'phone', 'url', 'text')
 TYPE_SECRET = re.compile(r'pass\s*(word|code|phrase)|\bpin\b|otp|one.time|verification code|2fa|cvv|cvc|card number|iban|api.?key|token|secret|كلمة (ال)?سر', re.I)
 def type_people():
     """[{name, emails, phones}] for everyone in Mac Contacts with an email or phone, read in one bulk call (~0.7 s for 700 people)."""
-    script = 'var a = Application("Contacts"); JSON.stringify([a.people.name(), a.people.emails.value(), a.people.phones.value()])'
+    script = 'var a = Application("com.apple.AddressBook"); JSON.stringify([a.people.name(), a.people.emails.value(), a.people.phones.value()])'   # by id: the name "Contacts" can resolve to the People widget, which has nobody
     try:
         r = subprocess.run(['osascript', '-l', 'JavaScript', '-e', script], capture_output=True, text=True, timeout=8)
         names, emails, phones = json.loads(r.stdout) if r.returncode == 0 else ([], [], [])
@@ -8739,6 +8819,8 @@ def main():
         return print(mail_tool(args[1:]))
     if args[:1] == ['--whatsapp']:
         return print(whatsapp_tool(args[1:]))
+    if args[:1] == ['--talk']:
+        return print(talk_tool(args[1:]))
     if args[:1] == ['--typein']:
         return print(type_tool(args[1:]))
     if args[:1] == ['--heard']:
@@ -8874,6 +8956,7 @@ def main():
     scr = describe(displays.screens, fx, fy)
     if os.environ.get('ATTICUS_SCREEN'): scr += '; Request screen (default for unnamed moves and drawings): ' + os.environ['ATTICUS_SCREEN']
     ctx = f'Front app: {app}. Front window: {win or "?"}.' + f' Screens: {scr}. Now: {time.strftime("%a %b %d %Y %I:%M %p")}.'
+    if pref('jarvis', False): ctx += talk_context()
     if pref('jarvis', False) and time.localtime().tm_hour < 5:   # 2 am and "tomorrow at 6" means after he sleeps: today's date
         ctx += f' Past midnight, not slept yet: "tomorrow" means {time.strftime("%A %b %d")} (today\'s date), "tonight" means now; say the weekday when setting a time.'
     ctx += system_ui_context()

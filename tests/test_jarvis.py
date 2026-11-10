@@ -19,6 +19,14 @@ class JarvisTests(unittest.TestCase):
         self.assertEqual(prompt(jarvis=False), prompt())
         self.assertEqual(prompt(jarvis=True), prompt() + atticus.JARVIS + atticus.JARVIS_TOOLS)
 
+    def test_knowing_him_saves_only_lasting_facts_in_his_words(self):
+        line = atticus.JARVIS_TOOLS[atticus.JARVIS_TOOLS.index('Knowing him:'):atticus.JARVIS_TOOLS.index('Talking style:')]
+        self.assertIn(f'{atticus.shlex.quote(atticus.ME)} --me add <people|places|preferences|school_work|notes>', line)   # the profile store that refuses secrets and words he never said
+        for rule in ('his exact words', 'never a one-off plan', 'money, health, passwords or codes', "--me drop <id>"):
+            self.assertIn(rule, line)
+        self.assertIn(f'{atticus.shlex.quote(atticus.ME)} --me add', atticus.QUIET)   # saving a fact needs no approval; it cannot act
+        self.assertNotIn('Knowing him:', prompt())   # JARVIS mode only
+
     def test_persona_is_small_and_keeps_safety(self):
         self.assertLessEqual(len(atticus.JARVIS), 2700)   # every ask pays for it
         for text in ('sir', 'Shall I go ahead?', 'Allow card', 'Cairo', 'never quote films'):
@@ -369,7 +377,8 @@ class JarvisTests(unittest.TestCase):
     def test_voice_level_only_when_the_app_asks(self):
         app = open(os.path.join(os.path.dirname(__file__), '..', 'Atticus.swift')).read()
         self.assertIn('if ProcessInfo.processInfo.environment["ATTICUS_JARVIS_LEVELS"] == "1" {', app)
-        self.assertIn('env["ATTICUS_JARVIS_LEVELS"] = "1"; p.environment = env', app)
+        self.assertIn('var env = ProcessInfo.processInfo.environment; env["ATTICUS_JARVIS_LEVELS"] = "1"', app)
+        self.assertIn('        p.environment = env\n        let out = Pipe(); p.standardOutput = out', app)
         self.assertIn('if Prefs.bool("jarvis") { jarvisLevels(p) }', app)
 
     def test_approvals_are_spoken_and_answered_by_voice_in_jarvis_mode(self):
@@ -384,6 +393,25 @@ class JarvisTests(unittest.TestCase):
 class JarvisTalkOverTests(unittest.TestCase):
     def source(self):
         return open(os.path.join(os.path.dirname(__file__), '..', 'Atticus.swift')).read()
+
+    def test_echo_cancelled_mic_on_speakers_only(self):
+        app = self.source()
+        self.assertIn('"jarvisEcho": true', app)
+        self.assertIn('let echo = Prefs.bool("jarvisEcho") && !jarvisHeadphones() ? JarvisEcho() : nil', app)   # AirPods: no voice processing
+        helper = app[app.index('final class JarvisPlayer {'):app.index('func jarvisOpen(')]
+        # the output format is read before the mixer exists (inline, every start failed), and voice processing is on the input
+        self.assertLess(helper.index('let out = engine.outputNode.inputFormat(forBus: 0)'), helper.index('engine.connect(engine.mainMixerNode, to: engine.outputNode, format: out)'))
+        self.assertIn('engine.inputNode.setVoiceProcessingEnabled(true)', helper)
+        self.assertIn('duckingLevel: .min', helper)                                    # his music is not turned down
+        self.assertIn('echoTries == 0 && echoArmed ?', helper)                         # one failed start: plain voice, no second mic tap
+        # never while the app's own mic is open (voice processing silenced it): a voice started ahead waits for the app's cue
+        self.assertIn('let out = JarvisPlayer(); out.echoArmed = words != "-"', app)
+        self.assertIn('else if line == jarvisEchoLine { out.armEcho() }', app)
+        self.assertIn('guard !engine.isRunning, let p = jarvisLive, voice === p', app)
+        self.assertIn('if echo { FileHandle.standardOutput.write(Data("M on\\n".utf8)) }', helper)
+        tick = app[app.index('    func bargeTick() {'):app.index('    func talkedOver(')]
+        self.assertIn('let speakers = echo == nil && !jarvisHeadphones()', tick)       # clean mic: any words cut in
+        self.assertIn('if let echo { bargeEcho = echo; echo.feed {', tick)
 
     def test_his_own_echo_never_stops_him_but_mahmoud_does(self):
         from tests import run_swift
@@ -422,6 +450,8 @@ class JarvisTalkOverTests(unittest.TestCase):
             ("Cairo's partly cloudy and 24 degrees.", 'cairos partly stop', '2'),
             ("Cairo's partly cloudy and 24 degrees.", 'cairos partly hold on', '2'),
             ("Cairo's partly cloudy and 24 degrees.", 'jarvis', '0'),
+            ("Cairo's partly cloudy and 24 degrees.", 'cairos partly enough', '2'), ("Cairo's partly cloudy and 24 degrees.", 'cairos listen', '1'),
+            ("That's enough for today, sir.", 'thats enough for today sir', 'nil'),   # his own "enough" is not Mahmoud's
         ]
         body += ''.join(f'print(jarvisTalkOver({json.dumps(h)}.split(separator: " ").map(String.init), spoken: {json.dumps(said)} + " " + jarvisKokoroText({json.dumps(said)}), wordsOnly: true).map(String.init) ?? "nil")\n' for said, h, _ in spk)
         echo = {"That's the old tab, sir, still on black dust clamp.": True, 'the old tab': True, 'open the old tab on noon please and close jumia': False, 'yes': False}
@@ -429,14 +459,15 @@ class JarvisTalkOverTests(unittest.TestCase):
         body += ''.join(f'print(said.echo({json.dumps(k)}))\n' for k in echo)
         body += 'let old = JarvisSaid(); old.note("the old tab"); print(old.echo("the old tab", within: 0))\n'   # only right after he spoke
         made = {'to the channel.': True, 'and see you next time.': True, 'Thanks for watching!': True, 'Subscribe to the channel.': True,
-                'send it to the channel': False, 'see you next time Ahmed, tell him': False, 'goodbye': False}
+                'send it to the channel': False, 'see you next time Ahmed, tell him': False, 'goodbye': False,
+                '*sad music*': True, '[Music]': True, '(applause) [BLANK_AUDIO]': True, 'play [Music] by someone': False, 'call (my) brother': False}
         body += ''.join(f'print(W.madeUp({json.dumps(k)}))\n' for k in made)
         want = [c[2] for c in cases] + [c[2] for c in spk] + [str(v).lower() for v in echo.values()] + ['false'] + [str(v).lower() for v in made.values()]
         self.assertEqual(run_swift(self, body).split(), want)
         self.assertIn('Whisper.shared.isEcho = { jarvisSaid.echo($0) }', app)
         self.assertIn('jarvisSaid.note(jarvisSaying + " " + jarvisKokoroText(jarvisSaying))', app)
         self.assertIn('spoken: jarvisSaying + " " + jarvisKokoroText(jarvisSaying), wordsOnly: speakers)', app)
-        self.assertIn('let speakers = !jarvisHeadphones()', app)
+        self.assertIn('let speakers = echo == nil && !jarvisHeadphones()', app)
 
     def test_talk_over_is_jarvis_hands_free_only_and_keeps_voice_approvals(self):
         app = self.source()
@@ -496,7 +527,7 @@ class JarvisResponsivenessTests(unittest.TestCase):
         app = self.source()
         self.assertIn("for _ in range(80):   # an old copy whose app just quit lets go within 15 s", app)
         self.assertIn('if jarvisKokoroReady(), let fd = jarvisKokoroConnect() { Darwin.close(fd) } else if jarvisKokoroReady() { jarvisWarm() }', app)
-        self.assertIn('if jarvisKokoroReady() { jarvisKokoroPrerender(rate: max(120, min(260, Prefs.num("jarvisRate")))) }', app)
+        self.assertIn('if jarvisKokoroReady() { jarvisKokoroPrerender(rate: max(120, min(260, Prefs.num("jarvisRate") + jarvisTalkSpeed()))) }', app)
         self.assertIn('guard words.count <= 30, !key.isEmpty else { return nil }', app)   # only short lines are cached
         self.assertIn('let want = Prefs.bool("jarvis") && Prefs.bool("speak") && handsFree && engine.isRunning && !dictating', app)   # spare voice: JARVIS chats only
         self.assertIn('guard audio.processingFormat == format else { return addConverted(audio, gap: gap) }', app)   # Apple's voice after a primed player still plays
@@ -528,6 +559,10 @@ class JarvisResponsivenessTests(unittest.TestCase):
         self.assertNotIn('arc(', back)   # the outer disc and its rim are gone
         for api in ("heard() {", "step(text) {", "work:   {", "function drawWave(", "function drawCards(", "drawWave(R, cx, cy); drawCards(R, cx, cy, p);"):
             self.assertIn(api, page)
+        for look in ("function drawInflow(", "function drawVoice(", "function burst(el) {", "if (!was) burst(cc);", "if (!was) burst(document.getElementById('tcBar'));", "scs.appendChild(el); burst(el);",
+                     "#cc.on { visibility: visible; opacity: 1; transition: none; animation: asIn .8s ease backwards; }"):
+            self.assertIn(look, page)   # thinking = blocks falling into the core, each voice = a ribbon, every card arrives the same way
+        for old in ("uOrbit", "orbitSpeed", "sweepAt"): self.assertNotIn(old, page)   # no orbiting glints, thinking or waking
         app = self.source()
         self.assertIn('if Prefs.bool("jarvis") && !dictating { face.run("jarvis.heard()") }', app)
         step = app[app.index('if line.hasPrefix("▸ "), Prefs.bool("jarvis") {'):]
@@ -566,6 +601,33 @@ class JarvisResponsivenessTests(unittest.TestCase):
         self.assertIn("f'{shlex.quote(ME)} --heard '", open(atticus.__file__).read())
         app = self.source()
         self.assertIn('config + "/heard.json"', app[app.index('var hints: [String]'):][:900])
+
+    def test_learns_how_he_likes_to_be_talked_to(self):
+        import tempfile, json as j
+        d = tempfile.mkdtemp(); talk, events = os.path.join(d, 'talk.json'), os.path.join(d, 'talk-events.jsonl')
+        with patch.object(atticus, 'DIR', d), patch.object(atticus, 'TALK', talk), patch.object(atticus, 'TALK_EVENTS', events):
+            self.assertEqual(atticus.talk_context(), '')
+            self.assertIn('Nothing learned', atticus.talk_tool(['--list']))
+            for w in ('shorter', 'slower', 'slower', 'less-wit'): self.assertIn('Saved', atticus.talk_tool([w]))
+            for _ in range(5): atticus.talk_tool(['faster'])
+            t = atticus.talk_rows(); self.assertEqual((t['length'], t['speed'], t['wit']), (-1, 3, -1))   # speed stays within 30 of his setting
+            self.assertIn('Saved', atticus.talk_tool(['note', 'just the temperature for weather']))
+            for bad in (['note', 'send texts without asking'], ['note', 'my password is x'], ['note', 'x']): self.assertIn('Not saved', atticus.talk_tool(bad))
+            ctx = atticus.talk_context()
+            self.assertIn('one sentence', ctx); self.assertIn('Humour only now and then', ctx); self.assertIn('just the temperature', ctx)
+            self.assertIn('Note: just the temperature', atticus.talk_tool(['--list']))
+            now = atticus.time.time(); t = atticus.talk_rows(); t['seen'] = 0; atticus.write_json(talk, t)
+            with open(events, 'w') as f:   # two short cut-ins never count; three long ones within 3 days do
+                for secs, n in ((3, 1), (9, 1), (8, 3), (12, 4), (7.5, 2)): f.write(j.dumps({'at': now - 1, 'secs': secs, 'sentences': n}) + '\n')
+            self.assertEqual(atticus.talk_learn(now)['length'], -2)
+            self.assertEqual(atticus.talk_learn(now + 1)['length'], -2)   # the same cut-ins never count twice
+            self.assertIn('very short', atticus.talk_context())
+            self.assertIn('Forgotten', atticus.talk_tool(['--forget', 'temperature']))
+            self.assertEqual(atticus.talk_tool(['--forget', 'nothing like it']), 'Nothing like that was saved.')
+            atticus.talk_tool(['--forget', 'all']); self.assertEqual(atticus.talk_context(), '')
+        swift = open(os.path.join(os.path.dirname(__file__), '..', 'Atticus.swift')).read()
+        self.assertIn('Prefs.num("jarvisRate") + jarvisTalkSpeed()', swift); self.assertIn('talk-events.jsonl', swift)
+        self.assertIn('--talk shorter|longer|slower|faster|less-wit|more-wit', atticus.JARVIS_TOOLS)
 
     def test_room_noise_never_becomes_words_before_his_voice(self):
         app = self.source()

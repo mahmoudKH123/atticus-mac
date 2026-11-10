@@ -9,14 +9,16 @@
   #dim { position: fixed; inset: 0; opacity: 0; transition: opacity .8s ease;
       background: radial-gradient(ellipse at center, rgba(2,1,0,.9) 0%, rgba(2,1,0,.76) 42%, rgba(2,1,0,.55) 100%); }
   canvas { position: fixed; inset: 0; width: 100%; height: 100%; }
-  /* the type-in console: a line drops from the globe and unfolds into a slim bar; contacts suggest above it */
-  #tc { position: fixed; left: 50%; transform: translateX(-50%); visibility: hidden; transition: visibility 0s linear .65s; font-family: "SF Mono", Menlo, monospace; color: #ffdea5; }
-  #tc.on { visibility: visible; transition-delay: 0s; }
+  /* every card arrives the same way: pixel blocks leave the globe and settle where the card will be, then the card is there */
+  @keyframes asIn { 0%, 52% { opacity: 0; } }
+  /* the type-in console: a line drops from the globe to a slim bar; contacts suggest above it */
+  #tc { position: fixed; left: 50%; transform: translateX(-50%); visibility: hidden; opacity: 0; transition: opacity .25s ease, visibility 0s linear .25s; font-family: "SF Mono", Menlo, monospace; color: #ffdea5; }
+  #tc.on { visibility: visible; opacity: 1; transition: none; }
   #tcLine { position: absolute; left: 50%; bottom: 100%; width: 1px; height: 0; background: rgba(255,145,35,.7); transition: height .28s cubic-bezier(.2,.8,.2,1); }
   #tc.on #tcLine { height: var(--drop); }
   #tcBar { position: relative; box-sizing: border-box; height: var(--h); display: flex; align-items: center; gap: .9em; padding: 0 1.1em;
-      background: rgba(10,5,1,.88); border: 1px solid rgba(255,145,35,.5); clip-path: inset(0 50% 0 50%); transition: clip-path .38s cubic-bezier(.2,.8,.2,1) .22s; }
-  #tc.on #tcBar { clip-path: inset(0 0 0 0); }
+      background: rgba(10,5,1,.88); border: 1px solid rgba(255,145,35,.5); }
+  #tc.on #tcBar { animation: asIn .75s ease backwards; }
   #tcBar::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: rgba(255,145,35,.95); }
   #tcLabel { color: rgba(255,145,35,.85); letter-spacing: .08em; text-transform: uppercase; font-size: .78em; white-space: nowrap; }
   #tcIn { flex: 1; min-width: 0; background: transparent; border: 0; outline: 0; color: #fff3dc; font: inherit; caret-color: #ffb347; caret-shape: block; letter-spacing: .02em; }
@@ -32,9 +34,9 @@
   @keyframes tcIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
   /* the compose card: the whole email beside the globe; only his own click or ⌘↵ sends it */
   #cc { position: fixed; box-sizing: border-box; display: flex; flex-direction: column; gap: .55em; padding: 1em 1.15em 1.05em; visibility: hidden; opacity: 0;
-      transform: translateX(-14px); transition: opacity .3s ease, transform .35s cubic-bezier(.2,.8,.2,1), visibility 0s linear .35s;
+      transition: opacity .25s ease, visibility 0s linear .25s;
       font-family: "SF Mono", Menlo, monospace; color: #ffdea5; background: rgba(10,5,1,.92); border: 1px solid rgba(255,145,35,.5); }
-  #cc.on { visibility: visible; opacity: 1; transform: none; transition-delay: 0s; }
+  #cc.on { visibility: visible; opacity: 1; transition: none; animation: asIn .8s ease backwards; }
   #cc::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: rgba(255,145,35,.95); }
   #ccHead { display: flex; align-items: baseline; gap: .8em; }
   #ccHead b { color: rgba(255,145,35,.95); letter-spacing: .1em; font-weight: 500; font-size: .82em; }
@@ -70,6 +72,21 @@
   #ccMsg.err { color: #ff9a7a; }
   #ccList { position: absolute; left: 4.9em; right: 0; top: 100%; z-index: 2; display: flex; flex-direction: column; gap: 3px; margin-top: 3px; }
   #cc.drop { border-color: rgba(255,200,110,1); box-shadow: 0 0 0 1px rgba(255,200,110,.6) inset; }
+  /* the step cards: one per task step, right of the globe */
+  #scs { position: fixed; display: flex; flex-direction: column; font-family: "SF Mono", Menlo, monospace; color: #ffdea5; pointer-events: none; }
+  .sc { position: relative; box-sizing: border-box; display: flex; align-items: center; gap: .9em; padding: 0 .9em; font-weight: 500;
+      background: rgba(10,5,1,.88); border: 1px solid rgba(255,145,35,.45); animation: asIn .75s ease backwards; }
+  .sc::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: rgba(255,145,35,.95); }
+  .sc i { font-style: normal; color: rgba(255,145,35,.7); }
+  .sc span { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #fff3dc; }
+  .sc u { text-decoration: none; display: inline-block; animation: scType .45s steps(18) .38s backwards; }
+  .sc em { display: flex; align-items: center; justify-content: center; width: 1em; font-style: normal; }
+  .sc em b { width: .62em; height: .62em; background: #ffdea5; animation: scBeat 1s ease-in-out infinite; }
+  .sc.done { opacity: .62; }
+  .sc.done em b { animation: none; background: none; width: auto; height: auto; font-weight: 500; }
+  .sc.done em b::after { content: "✓"; }
+  @keyframes scBeat { 0%, 100% { opacity: .25; transform: scale(.65); } 50% { opacity: 1; transform: scale(1); } }
+  @keyframes scType { from { clip-path: inset(0 100% 0 0); } }
 </style>
 </head>
 <body>
@@ -77,6 +94,7 @@
 <canvas id="hudBack"></canvas>
 <canvas id="gl"></canvas>
 <canvas id="hud"></canvas>
+<div id="scs"></div>
 <div id="tc"><div id="tcLine"></div><div id="tcList"></div>
   <div id="tcBar"><span id="tcLabel"></span><input id="tcIn" autocomplete="off" autocapitalize="off" spellcheck="false"><span id="tcHint">↵ send · esc</span></div></div>
 <div id="cc"><div id="ccHead"><b id="ccTitle">EMAIL</b><span id="ccVia">via Apple Mail · Gmail</span><span id="ccX" title="Close (esc)">✕</span></div>
@@ -110,7 +128,7 @@ addEventListener('resize', resize); resize();
 const VS = `
 attribute vec3 aPos; attribute vec4 aP;
 uniform float uT, uLevel, uGather, uBurst, uCore, uAspect, uScale, uPx, uFade, uHeat, uIsLine, uView;
-uniform float uListen, uOrbitW, uOrbit, uPulseR, uPulseA;   // alive: ripples with his voice, an orbiting glint, a pulse through the rings
+uniform float uListen, uPulseR, uPulseA;   // alive: ripples with his voice, a pulse through the rings
 uniform vec2 uOff;
 uniform mat3 uRot, uRotZ;
 varying float vA, vHot, vType, vAng;
@@ -135,13 +153,11 @@ void main() {
   p = mix(spinY(q, (1.0 - ge) * (1.0 - ge) * 2.4), q, uView);
   p *= 1.0 + uBurst * shell * (0.2 + h(s + 8.0) * 0.8);   // signing off: drift outward and fade
   p = mix(uRot * p, uRotZ * p, uView);
-  // alive: while he talks the ring ripples with his voice; thinking sends glints round it; a pulse rolls through on "got it" and on each task step
+  // alive: while he talks the ring ripples with his voice; a pulse rolls through on "got it" and on each task step
   float sa = atan(p.y, p.x), wave = 0.5 + 0.5 * sin(sa * 7.0 - uT * 5.0 + h(s + 2.0) * 0.8);
   p *= 1.0 + uView * uListen * uLevel * 0.06 * wave;
-  float da = mod(sa - uOrbit + 3.14159, 6.28318) - 3.14159, db = mod(sa - uOrbit, 6.28318) - 3.14159;
-  float glint = exp(-da * da * 30.0) + (da < 0.0 ? exp(da * 3.5) * 0.35 : 0.0) + exp(-db * db * 30.0) * 0.6 + (db < 0.0 ? exp(db * 3.5) * 0.2 : 0.0);
   float pr = length(p.xy) - uPulseR, pulse = uPulseA * exp(-pr * pr * 160.0);
-  float alive = 1.0 + uListen * uLevel * 1.2 * wave * (0.4 + 0.6 * uView) + uOrbitW * glint * (0.6 + 1.6 * uView) + pulse * 2.2;
+  float alive = 1.0 + uListen * uLevel * 1.2 * wave * (0.4 + 0.6 * uView) + pulse * 2.2;
   float z = 3.2 - p.z;
   gl_Position = vec4((p.x * (3.2 / z) * uScale + uOff.x) / uAspect, p.y * (3.2 / z) * uScale + uOff.y, 0.0, 1.0);
   vec3 rd = uRot * nd;
@@ -201,7 +217,7 @@ function program(vs, fs, names, attrs) {
   const u = { p }; for (const n of names) u[n] = gl.getUniformLocation(p, n); return u;
 }
 const GEO_U = ['uT', 'uLevel', 'uGather', 'uBurst', 'uCore', 'uAspect', 'uScale', 'uPx', 'uFade', 'uHeat', 'uIsLine', 'uView', 'uOff', 'uRot', 'uRotZ', 'uLineGain',
-               'uListen', 'uOrbitW', 'uOrbit', 'uPulseR', 'uPulseA'];
+               'uListen', 'uPulseR', 'uPulseA'];
 const PTS = program(VS, FS_POINT, GEO_U, ['aPos', 'aP']), LNS = program(VS, FS_LINE, GEO_U, ['aPos', 'aP']);
 const BLUR = program(VQ, FS_BLUR, ['uTex', 'uDir'], ['aQ']), COMP = program(VQ, FS_COMP, ['uTex', 'uGain'], ['aQ']);
 gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE); gl.clearColor(0, 0, 0, 0);
@@ -368,15 +384,15 @@ function quad(pr, to, from, setup) {
 }
 
 // ----------------------------- state -----------------------------
-const STATES = {   // listen: the ring ripples with his voice; think: glints orbit; work (a task step): faster glints, a pulse per step; speak: the core beats with the words
-  idle:   { spin: 0.06, ring: 0.015, core: 0.7, heat: 0.0,  listen: 0, orbit: 0,   orbitSpeed: 0,   beat: 0 },
-  listen: { spin: 0.08, ring: 0.02,  core: 0.9, heat: 0.03, listen: 1, orbit: 0,   orbitSpeed: 0,   beat: 0 },
-  think:  { spin: 0.3,  ring: 0.09,  core: 3.0, heat: 0.08, listen: 0, orbit: 0.8, orbitSpeed: 1.8, beat: 0 },
-  work:   { spin: 0.36, ring: 0.14,  core: 3.6, heat: 0.12, listen: 0, orbit: 1.0, orbitSpeed: 3.4, beat: 0 },
-  speak:  { spin: 0.09, ring: 0.025, core: 1.2, heat: 0.1,  listen: 0.5, orbit: 0, orbitSpeed: 0,   beat: 1 } };
+const STATES = {   // listen: the ring ripples with his voice and a ribbon shows it; think: pixel blocks fall into the core; work (a task step): they fall faster, a pulse per step; speak: the core beats with the words and a band of light carries them
+  idle:   { spin: 0.06, ring: 0.015, core: 0.7, heat: 0.0,  listen: 0,   beat: 0 },
+  listen: { spin: 0.08, ring: 0.02,  core: 0.9, heat: 0.03, listen: 1,   beat: 0 },
+  think:  { spin: 0.1,  ring: 0.03,  core: 3.0, heat: 0.08, listen: 0,   beat: 0 },
+  work:   { spin: 0.13, ring: 0.04,  core: 3.6, heat: 0.12, listen: 0,   beat: 0 },
+  speak:  { spin: 0.09, ring: 0.025, core: 1.2, heat: 0.1,  listen: 0.5, beat: 1 } };
 let state = 'idle', target = 0, level = 0, T = 0, flash = 0;
 let spinAng = 0, ringAng = 0, coreClock = 0, gaugeClock = 0;
-let orbitAng = 0, sweepW = 0, pulseR = 0, pulseA = 0, pulse = null, sweepAt = -9;   // alive: glints, the wake-up sweep, the ring pulse
+let pulseR = 0, pulseA = 0, pulse = null;   // alive: the ring pulse
 const startPulse = (from, to, secs, strength) => { pulse = { from, to, secs, strength, at: T }; };
 let phase = 'off', phaseAt = 0;
 const cur = { ...STATES.idle };
@@ -387,10 +403,10 @@ window.jarvis = {
     if (s === 'listen') { cards = []; cardsGone = 0; }   // a new ask starts clean
     else if ((s === 'speak' || s === 'idle') && cards.length && !cardsGone) { for (const c of cards) if (!c.done) { c.done = true; c.doneAt = T; } cardsGone = T; }   // the task is done: tick, then fade
   }, level(v) { target = Math.max(0, Math.min(1, +v || 0)); },
-  wake() { if (phase === 'on' || phase === 'waking') return; phase = 'waking'; phaseAt = T; fired = {}; cards = []; cardsGone = 0; dimEl.style.opacity = 1; sweepAt = T + 1.2; run(); },
+  wake() { if (phase === 'on' || phase === 'waking') return; phase = 'waking'; phaseAt = T; fired = {}; cards = []; cardsGone = 0; dimEl.style.opacity = 1; run(); },
   sleep() { if (phase === 'off' || phase === 'leaving') return; phase = 'leaving'; phaseAt = T; fired = {}; startPulse(1.1, 0, 0.5, 0.8); },
   heard() { if (phase === 'on') { startPulse(1.15, 0, 0.6, 1); flash = Math.max(flash, 0.3); } },   // "got it": a pulse rolls in to the core
-  step(text) {                                                                                       // each task step: a pulse rolls out, and its card slides out beside the globe
+  step(text) {                                                                                       // each task step: a pulse rolls out, and its card assembles beside the globe
     if (phase !== 'on') return; startPulse(0.1, 1.2, 0.75, 0.9); gaugeClock += 0.9;
     text = String(text || '').replace(/\s+/g, ' ').trim(); if (!text) return;
     if (text.length > 64) text = text.slice(0, 63) + '…';
@@ -398,30 +414,83 @@ window.jarvis = {
     cards.push({ text, at: T, done: false, doneAt: 0, n: ++cardCount }); cardsGone = 0;   // a step after a spoken line mid-task: keep the cards up
   },
 };
-// ----------------------------- hearing and working: the voice wave ring and the step cards -----------------------------
-const HIST = 96, hist = new Float32Array(HIST); let histAt = 0, histHead = 0, waveW = 0;   // his voice's last ~3 s, newest at the top of the ring
+// ----------------------------- hearing, thinking, speaking, working: his ribbon, the inflow, JARVIS's band, the step cards -----------------------------
+const TAU = Math.PI * 2, amber = a => `rgba(255,145,35,${Math.max(0, Math.min(1, a))})`, pale = a => `rgba(255,222,165,${Math.max(0, Math.min(1, a))})`;
+let waveW = 0, thinkW = 0, speakW = 0;   // how far the ribbon, the inflow and his own voice band have faded in
 let cards = [], cardCount = 0, cardsGone = 0;   // cardsGone: when the task ended (the reply started), the cards fade a moment later
+const SPOKES = 40, flow = []; let sparks = [];   // thinking: pixel blocks fall from the ring into the core along 40 straight rails
+function flowSpawn(p, anywhere) { p.a = ((Math.random() * SPOKES | 0) + 0.5) / SPOKES * TAU; p.r = anywhere ? 0.2 + Math.random() * 0.75 : 0.9 + Math.random() * 0.1; p.s = 2 + (Math.random() * 3 | 0); p.v = 0.7 + Math.random() * 0.6; return p; }
+for (let i = 0; i < 110; i++) flow.push(flowSpawn({}, true));
 function noteVoice(dt) {
-  histAt += dt;
-  while (histAt >= 1 / 32) { histAt -= 1 / 32; histHead = (histHead + 1) % HIST; hist[histHead] = state === 'listen' ? Math.sqrt(target) : 0; }
   waveW += ((state === 'listen' && phase === 'on' ? 1 : 0) - waveW) * Math.min(1, dt * 4);
+  speakW += ((state === 'speak' && phase === 'on' ? 1 : 0) - speakW) * Math.min(1, dt * 4);
+  thinkW += (((state === 'think' || state === 'work') && phase === 'on' ? 1 : 0) - thinkW) * Math.min(1, dt * 3);
+  if (thinkW < 0.01) return;
+  const v = dt * (state === 'work' ? 1.7 : 1);   // working a task step: faster
+  for (const p of flow) { p.r -= v * p.v * (0.12 + (1 - p.r) * 0.55); if (p.r < 0.2) { sparks.push({ at: T, a: p.a }); flowSpawn(p, false); } }   // it speeds up as it falls; arriving sparks the core's edge
 }
-function drawWave(R, cx, cy) {
-  if (waveW < 0.01) return;
-  const r0 = R * 0.585, amp = R * 0.12, N = 220, pts = [];
-  for (let i = 0; i <= N; i++) {
-    const th = i / N * Math.PI * 2, u = Math.abs(((th + Math.PI) % (Math.PI * 2)) - Math.PI) / Math.PI;   // 0 at the top, 1 at the bottom, mirrored left and right
-    const f = u * (HIST - 1), i0 = Math.floor(f), k = f - i0, at = j => hist[(histHead - j + HIST * 2) % HIST];
-    const v = at(i0) * (1 - k) + at(Math.min(HIST - 1, i0 + 1)) * k;
-    const fine = 0.72 + 0.18 * Math.sin(th * 23 + T * 9) + 0.1 * Math.sin(th * 41 - T * 14);   // a little texture, only where there is voice
-    const r = r0 + amp * v * fine * (1 - u * 0.35), a = th - Math.PI / 2;
-    pts.push(cx + Math.cos(a) * r, cy + Math.sin(a) * r);
+function drawInflow(R, cx, cy) {   // thinking: he draws everything in
+  if (thinkW < 0.01) return;
+  const w = thinkW, u = Math.max(1, R / 380);
+  hx.lineCap = 'butt'; hx.strokeStyle = amber(0.07 * w); hx.lineWidth = 1; hx.beginPath();
+  for (let i = 0; i < SPOKES; i++) { const a = (i + 0.5) / SPOKES * TAU; hx.moveTo(cx + Math.cos(a) * R * 0.24, cy + Math.sin(a) * R * 0.24); hx.lineTo(cx + Math.cos(a) * R * 0.7, cy + Math.sin(a) * R * 0.7); }
+  hx.stroke();
+  for (const p of flow) {
+    const k = clamp01((0.98 - p.r) / 0.2) * clamp01((p.r - 0.2) / 0.08), x = cx + Math.cos(p.a) * p.r * R, y = cy + Math.sin(p.a) * p.r * R, tail = R * (0.03 + (1 - p.r) * 0.09);
+    hx.strokeStyle = amber(0.45 * k * w); hx.beginPath(); hx.moveTo(x, y); hx.lineTo(x + Math.cos(p.a) * tail, y + Math.sin(p.a) * tail); hx.stroke();
+    const z = p.s * u; hx.fillStyle = p.r < 0.45 ? pale(k * w) : amber(0.95 * k * w); hx.fillRect(Math.round(x - z / 2), Math.round(y - z / 2), z, z);
   }
-  const path = () => { hx.beginPath(); hx.moveTo(pts[0], pts[1]); for (let i = 2; i < pts.length; i += 2) hx.lineTo(pts[i], pts[i + 1]); hx.closePath(); };
+  sparks = sparks.filter(a => T - a.at < 0.45);
+  for (const a of sparks) { const k = (T - a.at) / 0.45; hx.strokeStyle = pale((1 - k) * 0.8 * w); hx.lineWidth = 2; hx.beginPath(); hx.arc(cx, cy, R * 0.21, a.a - 0.12 * (1 - k) - 0.03, a.a + 0.12 * (1 - k) + 0.03); hx.stroke(); }
+}
+function drawVoice(R, cx, cy) {   // JARVIS's own voice: the same ribbon language as Mahmoud's, but a full band of light, so a chat reads as two voices
+  if (speakW < 0.01) return;
+  const half = R * 0.95, N = 96, lv = Math.min(1, Math.max(0.02, level * 1.35)), w = speakW;
   hx.lineJoin = 'round';
-  hx.strokeStyle = `rgba(255,150,40,${0.14 * waveW})`; hx.lineWidth = 7; path(); hx.stroke();
-  hx.strokeStyle = `rgba(255,214,140,${0.9 * waveW})`; hx.lineWidth = 1.6; path(); hx.stroke();
-  hx.strokeStyle = `rgba(255,150,40,${0.18 * waveW})`; hx.lineWidth = 1; hx.beginPath(); hx.arc(cx, cy, r0 - 5, 0, Math.PI * 2); hx.stroke();   // the quiet baseline
+  for (let j = 2; j >= 0; j--) {
+    const amp = R * (0.24 - j * 0.06) * lv, f = 1.3 + j * 0.6, sp = 2.0 + j * 0.9, ph = j * 2.1, top = [];
+    for (let i = 0; i <= N; i++) { const q = i / N * 2 - 1, env = Math.pow(1 - q * q, 1.6); top.push(cx + q * half, Math.abs(Math.sin(q * f * Math.PI + T * sp + ph) + 0.4 * Math.sin(q * f * 2.1 * Math.PI - T * sp * 1.2)) * amp * env * 0.7 + 1); }
+    hx.beginPath(); for (let i = 0; i < top.length; i += 2) { if (i) hx.lineTo(top[i], cy - top[i + 1]); else hx.moveTo(top[i], cy - top[i + 1]); }
+    for (let i = top.length - 2; i >= 0; i -= 2) hx.lineTo(top[i], cy + top[i + 1]);
+    hx.closePath(); hx.fillStyle = amber((0.1 + 0.05 * (2 - j)) * w); hx.fill();
+    hx.strokeStyle = j === 0 ? pale(0.95 * w) : amber((0.55 - j * 0.12) * w); hx.lineWidth = j === 0 ? 1.6 : 1; hx.stroke();
+  }
+}
+function drawWave(R, cx, cy) {   // his voice: layered ribbons of light through the globe; a still line when he pauses
+  if (waveW < 0.01) return;
+  const half = R * 0.95, N = 96, lv = Math.min(1, Math.max(0.015, level * 1.3)), w = waveW;
+  hx.lineJoin = 'round';
+  for (let j = 4; j >= 0; j--) {
+    const amp = R * (0.3 - j * 0.045) * lv, f = 1.5 + j * 0.55, sp = 2.4 + j * 0.8, ph = j * 1.7;
+    hx.beginPath();
+    for (let i = 0; i <= N; i++) {
+      const u = i / N * 2 - 1, env = Math.pow(1 - u * u, 2);
+      const y = cy + (Math.sin(u * f * Math.PI + T * sp + ph) + 0.35 * Math.sin(u * f * 2.3 * Math.PI - T * sp * 1.3 + ph)) * amp * env * 0.75;
+      if (i) hx.lineTo(cx + u * half, y); else hx.moveTo(cx + u * half, y);
+    }
+    if (j === 0) { hx.strokeStyle = amber(0.16 * w); hx.lineWidth = 7; hx.stroke(); }
+    hx.strokeStyle = j === 0 ? pale(0.95 * w) : amber((0.62 - j * 0.1) * w); hx.lineWidth = j === 0 ? 1.8 : 1.1; hx.stroke();
+  }
+}
+// every card's entrance: blocks fly from the globe's near edge to where the card will be (the card itself fades in over them, see asIn)
+let blocks = [];
+function burst(el) {
+  const b = el.getBoundingClientRect(); if (!b.width || phase === 'off') return;
+  const R = H * 0.35, cx = W / 2, cy = H / 2, n = Math.max(36, Math.min(260, Math.round(b.width * b.height / 650))), g = 7;
+  const ang = Math.atan2(b.top + b.height / 2 - cy, b.left + b.width / 2 - cx);
+  for (let i = 0; i < n; i++) {
+    const a = ang + (Math.random() - 0.5) * 1.5, r0 = R * (0.7 + Math.random() * 0.35);
+    blocks.push({ x0: cx + Math.cos(a) * r0, y0: cy + Math.sin(a) * r0, x1: b.left + Math.floor(Math.random() * b.width / g) * g, y1: b.top + Math.floor(Math.random() * b.height / g) * g,
+      at: T + Math.random() * 0.2, s: 3 + (Math.random() * 3 | 0), bend: (Math.random() - 0.5) * 60 });
+  }
+}
+function drawBlocks() {
+  if (!blocks.length) return; blocks = blocks.filter(b => T - b.at < 0.95);
+  for (const b of blocks) {
+    const e = T - b.at; if (e < 0) continue;
+    const k = ease(e / 0.42), a = e < 0.5 ? Math.min(1, e / 0.08) : 1 - clamp01((e - 0.5) / 0.4), dx = b.x1 - b.x0, dy = b.y1 - b.y0, l = Math.hypot(dx, dy) || 1, o = Math.sin(Math.PI * k) * b.bend;
+    hx.fillStyle = `rgba(255,${170 + Math.round(50 * k)},${70 + Math.round(80 * k)},${a * 0.9})`; hx.fillRect(Math.round(b.x0 + dx * k - dy / l * o), Math.round(b.y0 + dy * k + dx / l * o), b.s, b.s);
+  }
 }
 // ----------------------------- the type-in console: jarvis.type({label, kind, people}) / jarvis.typeClose() -----------------------------
 // The app gets {typed: text} on Enter, {typed: null} on Esc. Suggestions come from his Mac Contacts, matched here as he types.
@@ -474,7 +543,7 @@ Object.assign(window.jarvis, {
     o = o || {}; tcPeople = Array.isArray(o.people) ? o.people : []; tcKind = ['email', 'phone', 'url'].includes(o.kind) ? o.kind : 'text';
     document.getElementById('tcLabel').textContent = String(o.label || 'Type it').slice(0, 40);
     tcIn.value = ''; tcIn.type = tcKind === 'email' ? 'email' : tcKind === 'url' ? 'url' : 'text'; tcIn.inputMode = tcKind === 'phone' ? 'tel' : tcKind;
-    tcSel = -1; tcRender(); tcPlace(); tc.classList.add('on'); setTimeout(() => tcIn.focus(), 60);
+    const was = tc.classList.contains('on'); tcSel = -1; tcRender(); tcPlace(); tc.classList.add('on'); if (!was) burst(document.getElementById('tcBar')); setTimeout(() => tcIn.focus(), 60);
   },
   typeClose() { tc.classList.remove('on'); tcIn.blur(); tcList.innerHTML = ''; tcItems = []; },
   typing() { return tc.classList.contains('on'); },
@@ -630,7 +699,7 @@ Object.assign(window.jarvis, {
       ccRow('cc').hidden = ccKind !== 'email' || !ccState.cc.length; ccRow('bcc').hidden = ccKind !== 'email' || !ccState.bcc.length;
       ccSubject.value = d.subject || ''; ccBody.value = d.body || ''; ccState.files = Array.isArray(d.files) ? d.files.slice() : [];
     }
-    ccCloseSuggest(); ccRender(); ccPlace(); cc.classList.add('on');
+    const was = cc.classList.contains('on'); ccCloseSuggest(); ccRender(); ccPlace(); cc.classList.add('on'); if (!was) burst(cc);
     setTimeout(() => { if (!ccState.to.length) ccRow('to').querySelector('input').focus(); else if (!ccBody.value && ccKind !== 'call') ccBody.focus(); }, 80);
   },
   composeClose() { cc.classList.remove('on'); ccSending = false; ccCloseSuggest(); document.activeElement && document.activeElement.blur(); },
@@ -644,41 +713,31 @@ Object.assign(window.jarvis, {
   composeDrop(on) { cc.classList.toggle('drop', !!on); },
   composing() { return cc.classList.contains('on'); },
 });
+const scs = document.getElementById('scs');
 function drawCards(R, cx, cy, hudP) {
-  if (!cards.length) return;
-  if (cardsGone && T - cardsGone > 3.2) { cards = []; cardsGone = 0; return; }
-  const fade = (cardsGone ? 1 - clamp01((T - cardsGone - 2.4) / 0.8) : 1) * hudP;
-  const fs = Math.max(12, Math.round(R * 0.036)), gap = Math.round(fs * 2.9), h = Math.round(fs * 2.3);
-  const w = R * 0.95, x0 = Math.min(cx + R * 1.36, W - 24 - w), top = cy - R * 0.08;   // a narrow screen: the cards move in rather than get cut
-  const shown = cards.slice(-4), first = shown[0];
-  hx.font = `500 ${fs}px "SF Mono", Menlo, monospace`; hx.textBaseline = 'middle';
-  shown.forEach((c, i) => {
-    const e = T - c.at, old = cards.length - 4 > 0 && c === first ? clamp01((T - cards[cards.length - 1].at) / 0.4) : 0;   // the oldest of five slips away
-    const slide = ease(e / 0.45), a = fade * slide * (1 - old) * (c.done ? 0.62 : 1);
-    if (a < 0.01) return;
-    const y = top + i * gap, x = x0 + (1 - slide) * R * 0.18, c1 = v => `rgba(255,145,35,${Math.min(1, v * a)})`, c2 = v => `rgba(255,222,165,${Math.min(1, v * a)})`;
-    if (!c.done) {   // the live step: a line reaches out from the globe's edge to its card
-      const ang = Math.asin(Math.max(-0.95, Math.min(0.95, (y - cy) / (R * 1.05)))), sx = cx + Math.cos(ang) * R * 1.05, sy = cy + Math.sin(ang) * R * 1.05;
-      const k = ease(e / 0.3), mx = cx + R * 1.28;
-      hx.strokeStyle = c1(0.55); hx.lineWidth = 1; hx.beginPath(); hx.moveTo(sx, sy);
-      const ex = sx + (mx - sx) * k; hx.lineTo(ex, sy + (y - sy) * k); if (k >= 1) hx.lineTo(x, y); hx.stroke();
-      hx.fillStyle = c2(0.9); hx.fillRect(sx - 2, sy - 2, 4, 4);
+  drawBlocks();
+  if (cardsGone && T - cardsGone > 3.2) { cards = []; cardsGone = 0; }
+  const shown = cards.slice(-4);   // the oldest of five leaves
+  for (const el of [...scs.children]) if (!shown.includes(el._c)) el.remove();
+  if (!shown.length) return;
+  const fs = Math.max(12, Math.round(R * 0.036)), w = R * 0.95, x0 = Math.min(cx + R * 1.36, W - 24 - w), top = cy - R * 0.08;   // a narrow screen: the cards move in rather than get cut
+  Object.assign(scs.style, { left: x0 + 'px', top: (top - fs * 1.15) + 'px', width: w + 'px', fontSize: fs + 'px', gap: Math.round(fs * 0.6) + 'px',
+    opacity: (cardsGone ? 1 - clamp01((T - cardsGone - 2.4) / 0.8) : 1) * hudP });
+  for (const c of shown) {
+    if (!c.el) {
+      const el = c.el = document.createElement('div'); el.className = 'sc'; el._c = c; el.style.height = Math.round(fs * 2.3) + 'px';
+      el.innerHTML = `<i>${String(c.n).padStart(2, '0')}</i><span><u></u></span><em><b></b></em>`; el.querySelector('u').textContent = c.text;   // the text types out; a pulsing block while it works, then a tick
+      scs.appendChild(el); burst(el);
     }
-    hx.fillStyle = `rgba(10,5,1,${0.85 * a})`; hx.fillRect(x, y - h / 2, w, h);
-    hx.strokeStyle = c1(0.45); hx.lineWidth = 1; hx.strokeRect(x + 0.5, y - h / 2 + 0.5, w - 1, h - 1);
-    hx.fillStyle = c1(0.9); hx.fillRect(x, y - h / 2, 3, h);
-    hx.fillStyle = c1(0.7); hx.fillText(String(c.n).padStart(2, '0'), x + fs * 0.9, y);
-    const typed = c.text.slice(0, Math.floor(clamp01((e - 0.15) * 45 / c.text.length) * c.text.length));   // types out, ~45 letters a second
-    let t = typed; const room = w - fs * 6.2;
-    while (t.length > 1 && hx.measureText(t).width > room) t = t.slice(0, -2) + '…';
-    hx.fillStyle = c2(0.95); hx.fillText(t, x + fs * 2.9, y);
-    const mx = x + w - fs * 1.4;
-    if (c.done) {   // a tick
-      hx.strokeStyle = c2(0.9); hx.lineWidth = 1.6; hx.beginPath(); hx.moveTo(mx - fs * 0.35, y); hx.lineTo(mx - fs * 0.08, y + fs * 0.28); hx.lineTo(mx + fs * 0.4, y - fs * 0.3); hx.stroke();
-    } else {        // working: a small turning arc
-      hx.strokeStyle = c2(0.9); hx.lineWidth = 1.6; hx.beginPath(); hx.arc(mx, y, fs * 0.36, T * 5, T * 5 + Math.PI * 1.3); hx.stroke();
-    }
-  });
+    c.el.classList.toggle('done', c.done);
+  }
+  const live = shown.find(c => !c.done);
+  if (live) {   // the live step: a line reaches out from the globe's edge to its card
+    const b = live.el.getBoundingClientRect(), y = b.top + b.height / 2, k = ease((T - live.at) / 0.3);
+    const ang = Math.asin(Math.max(-0.95, Math.min(0.95, (y - cy) / (R * 1.05)))), sx = cx + Math.cos(ang) * R * 1.05, sy = cy + Math.sin(ang) * R * 1.05;
+    hx.strokeStyle = amber(0.55 * hudP); hx.lineWidth = 1; hx.beginPath(); hx.moveTo(sx, sy); hx.lineTo(sx + (b.left - sx) * k, sy + (y - sy) * k); hx.stroke();
+    hx.fillStyle = pale(0.9 * hudP); hx.fillRect(sx - 2, sy - 2, 4, 4);
+  }
 }
 const clamp01 = x => Math.max(0, Math.min(1, x)), ease = x => 1 - Math.pow(1 - clamp01(x), 3);
 const easeIO = x => { x = clamp01(x); return x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2; };
@@ -742,7 +801,7 @@ function drawHud(R, cx, cy, tl) {
     for (let i = 0; i < 24; i++) { const a = i / 24 * Math.PI * 2 - gaugeClock * 0.4; hx.strokeStyle = c((i % 6 ? 0.3 : 0.7) * p); hx.beginPath(); hx.moveTo(gx + Math.cos(a) * gr * 1.08, gy + Math.sin(a) * gr * 1.08); hx.lineTo(gx + Math.cos(a) * gr * 1.22, gy + Math.sin(a) * gr * 1.22); hx.stroke(); }
     hx.fillStyle = c(0.9 * p); hx.beginPath(); hx.arc(gx, gy, 2.5, 0, Math.PI * 2); hx.fill();
   }
-  drawWave(R, cx, cy); drawCards(R, cx, cy, p);
+  drawInflow(R, cx, cy); drawVoice(R, cx, cy); drawWave(R, cx, cy); drawCards(R, cx, cy, p);
   if (flash > 0.01) {
     const gR = R * (0.25 + flash * 0.55), g = hx.createRadialGradient(cx, cy, 0, cx, cy, gR);
     g.addColorStop(0, `rgba(255,235,190,${flash * 0.7})`); g.addColorStop(0.4, `rgba(255,150,40,${flash * 0.2})`); g.addColorStop(1, 'rgba(255,110,20,0)');
@@ -760,7 +819,7 @@ function setGeo(pr, tl, lv, px, view) {
   gl.uniform1f(pr.uT, T); gl.uniform1f(pr.uLevel, lv); gl.uniform1f(pr.uGather, tl.gather); gl.uniform1f(pr.uBurst, tl.burst); gl.uniform1f(pr.uCore, Math.max(0.0001, tl.core * (1 + cur.beat * lv * 0.16)));
   gl.uniform1f(pr.uHeat, cur.heat); gl.uniform1f(pr.uAspect, W / H); gl.uniform1f(pr.uScale, 0.7); gl.uniform1f(pr.uPx, px); gl.uniform1f(pr.uFade, tl.fade);
   gl.uniform2f(pr.uOff, 0, 0); gl.uniform1f(pr.uIsLine, pr === LNS ? 1 : 0); gl.uniform1f(pr.uView, view); gl.uniform1f(pr.uLineGain, 1);
-  gl.uniform1f(pr.uListen, cur.listen); gl.uniform1f(pr.uOrbitW, Math.max(cur.orbit, sweepW)); gl.uniform1f(pr.uOrbit, orbitAng);
+  gl.uniform1f(pr.uListen, cur.listen);
   gl.uniform1f(pr.uPulseR, pulseR); gl.uniform1f(pr.uPulseA, pulseA);
 }
 function drawScene(tl, lv, glow) {
@@ -784,9 +843,6 @@ function frame(now) {
   const tl = timeline(), lv = Math.min(1, (phase === 'on' ? level : 0) + flash * 0.3);
   spinAng += dt * cur.spin; ringAng += dt * cur.ring; coreClock += dt * cur.core * (1 + lv * 0.6); gaugeClock += dt * (0.4 + cur.spin * 2);
   rotW = mat(spinAng, 0.3); rotZ = matZ(ringAng);
-  orbitAng += dt * cur.orbitSpeed;
-  const sw = (T - sweepAt) / 1.3;   // waking up: one glint sweeps all the way round the ring
-  if (sw > 0 && sw < 1) { sweepW = Math.sin(Math.PI * sw) * 0.9; if (cur.orbit < 0.05) orbitAng = Math.PI * 0.5 + sw * Math.PI * 2; } else sweepW = 0;
   if (pulse) { const k = (T - pulse.at) / pulse.secs; if (k >= 1) { pulse = null; pulseA = 0; } else { pulseR = pulse.from + (pulse.to - pulse.from) * ease(k); pulseA = pulse.strength * Math.sin(Math.PI * Math.min(1, k * 1.15)); } }
   gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.viewport(0, 0, cv.width, cv.height); gl.clear(gl.COLOR_BUFFER_BIT);
   const R = H * 0.35, cx = W / 2, cy = H / 2;

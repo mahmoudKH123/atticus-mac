@@ -478,7 +478,7 @@ class JarvisTalkOverTests(unittest.TestCase):
 
     def test_briefing_only_on_first_clap_of_the_day(self):
         app = self.source()
-        self.assertIn('if jarvisBriefingDue() { jarvisBrief() } else { clickMicrophone() }', app)
+        self.assertIn('if jarvisBriefingDue() { jarvisBrief() } else { jarvisGreet() }', app)   # every other call: a spoken greeting, then the mic
         clap = app[app.index('    func clapTick('):app.index('    func enableWakeWord(')]
         self.assertIn('jarvisBriefingDue()', clap)
         wake = app[app.index('    func wakeTick()'):app.index('    func clapTick(')]
@@ -935,6 +935,110 @@ class JarvisHearingFixTests(unittest.TestCase):
         app = open(os.path.join(os.path.dirname(__file__), '..', 'Atticus.swift')).read()
         self.assertIn('if Prefs.bool("jarvis"), !drawingReply, !partial.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return finishOrSignOff() }', app)
         self.assertIn('if Prefs.bool("jarvis"), picking || jarvisApproval { jarvisSpeakLive("Sorry, sir, say that again?"); jarvisEndLive(); jarvisCardListen() }', app)
+
+
+
+class JarvisEvolvesTests(unittest.TestCase):
+    """11/11: he answers when called, hears only a close voice, shows what he is doing, and the two crescents became orbits."""
+    def source(self):
+        with open(os.path.join(os.path.dirname(__file__), '..', 'Atticus.swift')) as f: return f.read()
+
+    def page(self):
+        with open(os.path.join(os.path.dirname(__file__), '..', 'ui', 'jarvis.html')) as f: return f.read()
+
+    def test_greets_the_moment_he_is_called(self):
+        from tests import run_swift
+        app = self.source()
+        body = 'import Foundation\n' + app[app.index('let jarvisGreetings'):app.index('// The voice helper\'s cue for the "got it" tone')] + """
+let first = { (l: [String]) -> String? in l.first }
+print(jarvisGreeting(hour: 8, sinceLast: 99999, lastPart: "", last: "", pick: first).line)
+print(jarvisGreeting(hour: 14, sinceLast: 60, lastPart: "morning", last: "", pick: first).line)                 // a new part of the day
+print(jarvisGreeting(hour: 19, sinceLast: 60, lastPart: "evening", last: "Yes, sir?", pick: first).line)        // called again soon: a short one, never the last one
+print(jarvisGreeting(hour: 19, sinceLast: 4000, lastPart: "evening", last: "Evening, sir.", pick: first).line)  // back after an hour
+print(jarvisGreeting(hour: 2, sinceLast: 99999, lastPart: "", last: "", pick: first).part, jarvisGreeting(hour: 23, sinceLast: 0, lastPart: "", last: "").part)
+print(jarvisGreetings.values.flatMap { $0 }.allSatisfy { $0.count <= 30 && $0.contains("ir") })                 // each fits the clip cache
+"""
+        self.assertEqual(run_swift(self, body).strip().split('\n'), ['Morning, sir.', 'Afternoon, sir.', 'Sir?', 'Good evening, sir.', 'night night', 'true'])
+        self.assertIn('for words in jarvisShortReplies + jarvisGreetings.values.flatMap({ $0 }).sorted() {', app)   # rendered ahead with the quick replies
+        self.assertIn('stopWake(); handsFree = true; if Prefs.bool("jarvis") { jarvisGreet() } else { clickMicrophone() }', app)
+        greet = app[app.index('    func jarvisGreet() {'):app.index('    func jarvisGreetLevel()')]
+        self.assertIn('guard handsFree, !busy, !engine.isRunning, !dictating else { return }', greet)
+        self.assertIn('jarvisGreeted = true; clickMicrophone(); jarvisGreeted = false', greet)                       # the mic opens as the greeting ends
+        self.assertIn('func cue(_ k: String) { if k == "soundStart", jarvisGreeted { return };', app)                # and the greeting was the start sound
+        self.assertIn('cueEnds = max(cueEnds, jarvisGreetUntil.addingTimeInterval(0.1))', greet)                    # the wake listeners do not hear him greet
+
+    def test_only_a_close_voice_counts(self):
+        from tests import run_swift
+        app = self.source()
+        body = 'import AVFoundation\n' + app[app.index('final class VoiceGate'):app.index('// JARVIS mode: two sharp claps wake the hands-free chat.')] + """
+let format = AVAudioFormat(standardFormatWithSampleRate: 16000, channels: 1)!
+var phase = 0.0
+func sound(_ rms: Float, _ secs: Double) -> [AVAudioPCMBuffer] {   // 20 ms buffers of a 440 Hz tone at this loudness
+    (0..<Int(secs / 0.02)).map { _ in
+        let b = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 320)!; b.frameLength = 320
+        for i in 0..<320 { b.floatChannelData![0][i] = rms * 1.4142 * Float(sin(phase)); phase += 2 * Double.pi * 440 / 16000 }
+        return b }
+}
+func rms(_ bs: [AVAudioPCMBuffer]) -> Float { var s: Float = 0, n = 0; for b in bs { for i in 0..<Int(b.frameLength) { let x = b.floatChannelData![0][i]; s += x * x; n += 1 } }; return sqrt(s / Float(max(1, n))) }
+func run(_ g: VoiceGate, _ bs: [AVAudioPCMBuffer]) -> Bool { var heard = false; for b in bs { g.hear(b); if g.takeHeard() { heard = true } }; return heard }
+let learnt = VoiceGate(his: 0.9)
+print(run(learnt, sound(0.002, 2)))                                    // the room: not a voice
+let tv = sound(0.012, 2); print(run(learnt, tv), rms(tv) < 0.004)      // a TV across the room, well under his level: not him, and turned down for Whisper
+print(learnt.summary().under > 1.5)
+let him = sound(0.06, 1); print(run(learnt, him), rms(Array(him.suffix(40))) > 0.05)   // his close voice: counts, at full level
+print(run(learnt, sound(0.002, 1)), run(learnt, sound(0.1, 0.04)))   // quiet again, then a key click: over in a moment
+print(abs(learnt.summary().level - 0.82) < 0.08, learnt.summary().voiced > 0.9)
+print(run(VoiceGate(his: 0), sound(0.012, 2)))                         // before his level is learnt, the old rule: anything over the room
+print(VoiceGate.bar(his: 0.9, room: 0.5) == 0.54, VoiceGate.bar(his: 0, room: 0.01) == 0.08)   // a noisy room never asks for more than 60 per cent of his level
+"""
+        self.assertEqual(run_swift(self, body).strip().split('\n'), ['false', 'false true', 'true', 'true true', 'false false', 'true true', 'true', 'true true'])
+        self.assertIn('gate?.hear(out)\n                if whisper { pcm.append(out) }', app)   # before Whisper gets the sound
+        self.assertIn('if whisper && (self?.closeVoice ?? (v > 0.1)) { self?.whisperVoiced() }', app)   # a TV no longer keeps the listen open
+        self.assertIn('"jarvisCloseVoice": true', app)
+        note = app[app.index('    func noteVoice(_ v: Double) {'):app.index('    func jarvisMicLearn() {')]
+        self.assertIn('if heard { voiceHeardAt = Date() }', note)
+        self.assertIn('NSLog("JARVIS mic: %.1f s, his voice %.1f s at %.2f', app)   # numbers only, never words
+        self.assertIn('if keys < 0.9 { NSLog("Clap: ignored, a key or click %.1f s ago", keys); return }', app)   # typing is not a double clap
+        wake = app[app.index('Self.hasWakeWord(result.bestTranscription.formattedString, word: Self.wakeName)'):][:900]
+        self.assertIn('if level < bar { stopWake(); return }', wake)   # his name from across the room does not wake him
+
+    def test_cards_say_what_he_is_doing(self):
+        import shlex
+        me = shlex.quote(atticus.ME)
+        def card(command, name='Bash'):
+            inp = command if isinstance(command, dict) else {'command': command}
+            return atticus.jarvis_card(name, inp, atticus.label(name, inp))
+        self.assertEqual(card({'query': 'Cairo weather tomorrow'}, 'WebSearch'), {'kind': 'WEB', 'title': 'Searching the web', 'detail': 'Cairo weather tomorrow'})
+        add = card(me + """ --reminders '{"action":"add","title":"Call the bank","list":"Reminders"}'""")
+        self.assertEqual((add['kind'], add['title'], add['detail']), ('REMINDERS', 'Adding “Call the bank”', 'list Reminders'))
+        self.assertEqual(card(me + """ --mac '{"action":"volume","value":"40"}'"""), {'kind': 'MAC', 'title': 'Setting the volume', 'detail': '40 per cent'})
+        self.assertEqual(card(me + """ --timer '{"action":"add","seconds":"600","name":"pasta"}'""")['detail'], '10 min · pasta')
+        self.assertEqual(card(me + " --shop 'usb-c hub' amazon --cheapest")['detail'], '“usb-c hub” · Amazon · cheapest first')
+        mail = card(me + """ --compose '{"to":["dad"],"subject":"Flight details","body":"the private part"}'""")
+        self.assertEqual((mail['kind'], mail['detail']), ('MAIL', 'to dad · Flight details'))                 # who and the subject, never the body
+        self.assertEqual(card(me + " --typein 'Wi-Fi password' text")['detail'], '')                          # nothing that looks secret
+        self.assertEqual(card('ls ~/Downloads'), {'kind': 'FILES', 'title': 'Looking through a folder', 'detail': '~/Downloads'})   # no more "Working on it"
+        self.assertNotIn(atticus.ME, json.dumps([card(me + ' --orders'), card(me + ' --window'), card('python3 -c "print(1)"')]))   # never the raw command
+        src = open(atticus.ME).read()
+        self.assertIn("if pref('jarvis', False): say('◈', json.dumps(jarvis_card(name, inp, steps[-1]), ensure_ascii=False))", src)
+        app, page = self.source(), self.page()
+        line = app[app.index('if line.hasPrefix("◈ ") {'):][:900]
+        self.assertIn('if let ask = j["ask"] as? String { self.jarvisAsk(ask) }', line)
+        self.assertIn('continue', line)                                                                         # never shown as an answer line
+        self.assertIn('let text = self.jarvisCard ?? (try? JSONSerialization.data(withJSONObject: String(line.dropFirst(2)), options: .fragmentsAllowed))', app)
+        self.assertIn('if offerText == nil { jarvisAsk(text) }', app)   # his words go up the moment he stops
+        self.assertIn('if busy { jarvisSteps = 0 } else { face.run("jarvis.done()")', app)                      # the task's end closes the cards, not a line spoken mid-task
+        for api in ("ask(text) {", "done() { taskDone(); }", "if (s === 'idle') taskDone();", "if (phase === 'off' || phase === 'leaving') return; startPulse(0.1, 1.2, 0.75, 0.9);",
+                    "cards = []; cardCount = 0; cardsGone = 0; req = { text, at: T, endAt: 0, fresh: 'new' };", '<div id="scH"><div><b>REQUEST</b><span></span></div><q></q></div>'):
+            self.assertIn(api, page)
+        self.assertNotIn("if (s === 'listen') { cards = []", page)                                              # a spoken answer to a card mid-task keeps the cards
+
+    def test_orbits_replace_the_crescents(self):
+        page = self.page()
+        for old in ('CRESCENT', 'crescent'): self.assertNotIn(old, page)
+        for new in ('const GYRO = [', 'function drawGyro(R, cx, cy, p) {', 'drawGyro(R, cx, cy, tl.arcs); drawInflow(R, cx, cy);', '(1 - 0.94 * flat)',
+                    "gyroClock += dt * (0.3 + thinkW * (state === 'work' ? 3.4 : 2.4));"):
+            self.assertIn(new, page)   # they face him and carry a voice; thinking spins them up
 
 
 if __name__ == '__main__':

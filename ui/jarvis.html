@@ -72,16 +72,26 @@
   #ccMsg.err { color: #ff9a7a; }
   #ccList { position: absolute; left: 4.9em; right: 0; top: 100%; z-index: 2; display: flex; flex-direction: column; gap: 3px; margin-top: 3px; }
   #cc.drop { border-color: rgba(255,200,110,1); box-shadow: 0 0 0 1px rgba(255,200,110,.6) inset; }
-  /* the step cards: one per task step, right of the globe */
+  /* the task, right of the globe: what he asked and how it is going, then a card per step (what, its kind and detail, how long it took) */
+  #scH { position: fixed; box-sizing: border-box; opacity: 0; padding: 0 0 .6em .1em; border-bottom: 1px solid rgba(255,145,35,.38); font-family: "SF Mono", Menlo, monospace; color: #ffdea5; pointer-events: none; }
+  #scH.in { animation: asIn .75s ease backwards; }
+  #scH div { display: flex; justify-content: space-between; align-items: baseline; font-size: .68em; font-weight: 600; letter-spacing: .16em; color: rgba(255,145,35,.95); }
+  #scH div span { color: rgba(255,222,165,.7); font-variant-numeric: tabular-nums; }
+  #scH q { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; margin-top: .4em; quotes: none; line-height: 1.35; color: #fff3dc; }
   #scs { position: fixed; display: flex; flex-direction: column; font-family: "SF Mono", Menlo, monospace; color: #ffdea5; pointer-events: none; }
-  .sc { position: relative; box-sizing: border-box; display: flex; align-items: center; gap: .9em; padding: 0 .9em; font-weight: 500;
+  .sc { position: relative; box-sizing: border-box; display: flex; align-items: stretch; gap: .85em; padding: .5em .95em; font-weight: 500;
       background: rgba(10,5,1,.88); border: 1px solid rgba(255,145,35,.45); animation: asIn .75s ease backwards; }
   .sc::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: rgba(255,145,35,.95); }
-  .sc i { font-style: normal; color: rgba(255,145,35,.7); }
+  .sc i { align-self: center; font-style: normal; color: rgba(255,145,35,.7); }
+  .sc .scT { flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: center; gap: .22em; }
+  .sc .scT div { display: flex; align-items: baseline; gap: .7em; min-width: 0; }
   .sc span { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #fff3dc; }
   .sc u { text-decoration: none; display: inline-block; animation: scType .45s steps(18) .38s backwards; }
-  .sc em { display: flex; align-items: center; justify-content: center; width: 1em; font-style: normal; }
+  .sc .scK { flex: none; font-size: .68em; font-weight: 600; letter-spacing: .16em; color: rgba(255,145,35,.95); }
+  .sc small { flex: 1; min-width: 0; font-size: .8em; color: rgba(255,222,165,.58); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .sc em { display: flex; align-items: center; gap: .55em; align-self: center; font-style: normal; font-size: .78em; color: rgba(255,222,165,.7); font-variant-numeric: tabular-nums; }
   .sc em b { width: .62em; height: .62em; background: #ffdea5; animation: scBeat 1s ease-in-out infinite; }
+  .sc em s { text-decoration: none; }
   .sc.done { opacity: .62; }
   .sc.done em b { animation: none; background: none; width: auto; height: auto; font-weight: 500; }
   .sc.done em b::after { content: "✓"; }
@@ -94,6 +104,7 @@
 <canvas id="hudBack"></canvas>
 <canvas id="gl"></canvas>
 <canvas id="hud"></canvas>
+<div id="scH"><div><b>REQUEST</b><span></span></div><q></q></div>
 <div id="scs"></div>
 <div id="tc"><div id="tcLine"></div><div id="tcList"></div>
   <div id="tcBar"><span id="tcLabel"></span><input id="tcIn" autocomplete="off" autocapitalize="off" spellcheck="false"><span id="tcHint">↵ send · esc</span></div></div>
@@ -108,8 +119,9 @@
 <script>
 'use strict';
 // =====================================================================
-// JARVIS: a globe of amber pixel blocks around a tangled core of light. The only text: task step cards beside it.
-// API for the app: jarvis.wake(), jarvis.sleep(), jarvis.state('idle'|'listen'|'think'|'speak'), jarvis.level(0..1), jarvis.step('Opening Chrome')
+// JARVIS: a globe of amber pixel blocks around a tangled core of light. The only text: the task beside it (what he asked, a card per step).
+// API for the app: jarvis.wake(), jarvis.sleep(), jarvis.state('idle'|'listen'|'think'|'speak'), jarvis.level(0..1),
+// jarvis.ask('what he said'), jarvis.step('Opening Chrome' or {kind, title, detail}), jarvis.done()
 // =====================================================================
 const cv = document.getElementById('gl');
 const gl = cv.getContext('webgl', { alpha: true, premultipliedAlpha: true, antialias: true });
@@ -304,14 +316,12 @@ for (let i = 0; i < 380; i++) {
   for (let j = 0; j < 4; j++) { const a0 = a + span * j / 4, a1 = a + span * (j + 1) / 4; vert(LV, [r * Math.cos(a0), r * Math.sin(a0), 0], 1, 0, b, s); vert(LV, [r * Math.cos(a1), r * Math.sin(a1), 0], 1, 0, b, s); }
 }
 
-// --- live: the tangled core loops and the big crescents, rebuilt every frame ---
+// --- live: the tangled core loops and the three orbits around them, rebuilt every frame ---
 const LOOPS = [[1, 2, 3], [2, 3, 1], [3, 1, 2], [1, 3, 2], [2, 1, 3], [3, 2, 1], [1, 2, 1], [2, 1, 2], [1, 1, 2], [3, 2, 2]].map(f => ({ f, ph: [rnd() * 6.28, rnd() * 6.28, rnd() * 6.28], r: 0.11 + rnd() * 0.08, axis: unit(), speed: (rnd() < 0.5 ? -1 : 1) * (0.3 + rnd() * 0.4), glow: 0.75 + rnd() * 0.45 }));
-// crescents face you (drawn in screen space): the big one sweeps around the left of the core
-const CRESCENTS = [
-  { r: 0.44, th0: 92, span: 178, strands: 18, w: 0.075, b: 1.0, sway: 9, tilt: 0.28, speed: 0 },
-  { r: 0.31, th0: -62, span: 118, strands: 8, w: 0.03, b: 0.85, sway: 14, tilt: -0.35, speed: 0 },
-  { r: 0.24, th0: 20, span: 200, strands: 4, w: 0.012, b: 0.9, sway: 0, tilt: 0.5, speed: 25 },
-];
+// the orbits (drawn in screen space): three hairlines of the core's own light, each carrying two pixel blocks. Idle they tumble slowly;
+// a voice (his or JARVIS's) turns them to face him and runs through them; thinking spins them up.
+const GYRO = [{ r: 0.30, bx: 1.05, by: 0.2, fx: 0.5, fy: 0.37, px: 0, py: 1, dir: 1 }, { r: 0.37, bx: -0.5, by: 0.95, fx: 0.41, fy: 0.55, px: 2, py: 0.3, dir: -1 }, { r: 0.44, bx: 0.35, by: -0.75, fx: 0.33, fy: 0.47, px: 4, py: 2.2, dir: 1 }];
+let gyroClock = 0; const gyroPts = [];
 const STATIC_LW = LW.pos.length / 3, LIVE_MAX = 9000;
 for (let i = 0; i < LIVE_MAX * 2; i++) vert(LW, [0, 0, 0], 1, 0, 0, -1 - rnd() * 1000);
 function upload(m, usage) {
@@ -347,18 +357,31 @@ function updateLive(core, level, scale, arcP) {
       }
     }
   }
-  // the big glowing crescents sweeping around the core
+  // the orbits
   const c0 = rotW.slice(0, 3), c1 = rotW.slice(3, 6), c2 = rotW.slice(6, 9), toGlobe = v => [dot(c0, v), dot(c1, v), dot(c2, v)];   // undo the globe's turn
-  for (const C of CRESCENTS) {
-    const deg = Math.PI / 180, start = (C.th0 + C.sway * Math.sin(T * 0.3 + C.r * 10) + core * C.speed) * deg, span = C.span * deg * arcP, ct = Math.cos(C.tilt), st = Math.sin(C.tilt);
-    for (let s = 0; s < C.strands; s++) {
-      const f = s / Math.max(1, C.strands - 1), rr = C.r + f * C.w, prof = Math.pow(1 - f, 1.6) * 0.85 + 0.15;
-      const on = a => { const x = Math.cos(a) * rr, y = Math.sin(a) * rr; return toGlobe([x, y * ct, y * st]); };
-      let prev = on(start), pb = 0;
-      for (let i = 1; i <= 90; i++) {
-        const t = i / 90, cur = on(start + span * t), env = Math.sin(Math.PI * t), b = C.b * prof * env * (0.85 + level * 0.4);
-        seg(prev, cur, pb, b); prev = cur; pb = b;
+  gyroPts.length = 0;
+  const flat = Math.max(waveW, speakW), full = Math.PI * 2 * arcP, N = 120;
+  for (let k = 0; k < 3; k++) {
+    const G = GYRO[k], tx = (G.bx + 0.5 * Math.sin(gyroClock * G.fx + G.px)) * (1 - 0.94 * flat), ty = (G.by + 0.5 * Math.cos(gyroClock * G.fy + G.py)) * (1 - 0.94 * flat);
+    const cx = Math.cos(tx), sx = Math.sin(tx), cy = Math.cos(ty), sy = Math.sin(ty);
+    const on = (a, m) => {   // his voice ripples around each orbit; JARVIS's own swells them
+      const rr = G.r * m * (1 + waveW * level * 0.11 * Math.sin(a * (4 + k) - T * (5 + k * 1.3)) + speakW * level * (0.1 + 0.03 * Math.sin(a * 2 + T * 3 + k)));
+      const x = Math.cos(a) * rr, y = Math.sin(a) * rr, z = y * sx;
+      return [x * cy + z * sy, y * cx, -x * sy + z * cy];
+    };
+    const spin = gyroClock * 0.4 * G.dir;
+    for (const [m, g] of [[1, 1], [1.014, 0.45]]) {
+      let prev = on(spin, m), pb = 0;
+      for (let i = 1; i <= N; i++) {
+        const t = i / N, cur = on(spin + full * t, m), ph = t - gyroClock * 0.12 * G.dir - k * 0.33, glint = Math.pow(0.5 + 0.5 * Math.cos((ph - Math.floor(ph)) * Math.PI * 2), 10);
+        const depth = 0.5 + 0.5 * Math.max(0, Math.min(1, 0.5 + cur[2] / G.r * 0.5));   // the far side of an orbit is dimmer
+        const b = g * (0.58 + 0.8 * glint) * depth * (0.85 + level * 0.7) * (1 + thinkW * 0.35) * Math.min(1, arcP * 2);
+        seg(toGlobe(prev), toGlobe(cur), pb, b); prev = cur; pb = b;
       }
+    }
+    if (arcP > 0.6) for (let j = 0; j < 2; j++) {   // the blocks are drawn on the frame layer, crisp like the rest of the pixels
+      const v = on(spin + gyroClock * (0.5 + 0.15 * k) * G.dir + j * Math.PI + k, 1), per = 3.2 / (3.2 - v[2] * scale);
+      gyroPts.push(v[0] * scale * per, v[1] * scale * per, v[2]);
     }
   }
   liveCount = n;
@@ -400,24 +423,35 @@ const dimEl = document.getElementById('dim');
 window.jarvis = {
   state(s) {
     if (!STATES[s]) return; state = s;
-    if (s === 'listen') { cards = []; cardsGone = 0; }   // a new ask starts clean
-    else if ((s === 'speak' || s === 'idle') && cards.length && !cardsGone) { for (const c of cards) if (!c.done) { c.done = true; c.doneAt = T; } cardsGone = T; }   // the task is done: tick, then fade
+    if (s === 'idle') taskDone();   // nothing is running any more: whatever is still open has finished
   }, level(v) { target = Math.max(0, Math.min(1, +v || 0)); },
-  wake() { if (phase === 'on' || phase === 'waking') return; phase = 'waking'; phaseAt = T; fired = {}; cards = []; cardsGone = 0; dimEl.style.opacity = 1; run(); },
+  wake() { if (phase === 'on' || phase === 'waking') return; phase = 'waking'; phaseAt = T; fired = {}; cards = []; cardsGone = 0; req = null; dimEl.style.opacity = 1; run(); },
   sleep() { if (phase === 'off' || phase === 'leaving') return; phase = 'leaving'; phaseAt = T; fired = {}; startPulse(1.1, 0, 0.5, 0.8); },
   heard() { if (phase === 'on') { startPulse(1.15, 0, 0.6, 1); flash = Math.max(flash, 0.3); } },   // "got it": a pulse rolls in to the core
-  step(text) {                                                                                       // each task step: a pulse rolls out, and its card assembles beside the globe
-    if (phase !== 'on') return; startPulse(0.1, 1.2, 0.75, 0.9); gaugeClock += 0.9;
-    text = String(text || '').replace(/\s+/g, ' ').trim(); if (!text) return;
-    if (text.length > 64) text = text.slice(0, 63) + '…';
-    for (const c of cards) if (!c.done) { c.done = true; c.doneAt = T; }
-    cards.push({ text, at: T, done: false, doneAt: 0, n: ++cardCount }); cardsGone = 0;   // a step after a spoken line mid-task: keep the cards up
+  ask(text) {                                                                                        // what he asked, as heard: the task's header, up the moment he stops talking
+    text = tidy(text, 160); if (phase === 'off' || phase === 'leaving' || !text) return;
+    if (req && !req.endAt && !cards.length) { if (req.text !== text) { req.text = text; req.fresh = 'text'; } return; }   // the same ask again, or with a misheard word put right
+    cards = []; cardCount = 0; cardsGone = 0; req = { text, at: T, endAt: 0, fresh: 'new' };
   },
+  step(text) {                                                                                       // each task step: a pulse rolls out, and its card assembles beside the globe
+    if (phase === 'off' || phase === 'leaving') return; startPulse(0.1, 1.2, 0.75, 0.9); gaugeClock += 0.9;   // a step that lands while he is still waking is kept (it used to be dropped)
+    const o = text && typeof text === 'object' ? text : { title: text }; text = tidy(o.title, 64); if (!text) return;
+    for (const c of cards) if (!c.done) { c.done = true; c.doneAt = T; }
+    cards.push({ text, kind: tidy(o.kind, 12).toUpperCase() || 'STEP', detail: tidy(o.detail, 72), at: T, done: false, doneAt: 0, n: ++cardCount });
+    cardsGone = 0; if (req) req.endAt = 0;   // a step after the task looked finished: it is still going
+  },
+  done() { taskDone(); },                                                                           // the app: the task has ended (a line spoken mid-task is not the end, so 'speak' no longer closes the cards)
 };
 // ----------------------------- hearing, thinking, speaking, working: his ribbon, the inflow, JARVIS's band, the step cards -----------------------------
 const TAU = Math.PI * 2, amber = a => `rgba(255,145,35,${Math.max(0, Math.min(1, a))})`, pale = a => `rgba(255,222,165,${Math.max(0, Math.min(1, a))})`;
 let waveW = 0, thinkW = 0, speakW = 0;   // how far the ribbon, the inflow and his own voice band have faded in
-let cards = [], cardCount = 0, cardsGone = 0;   // cardsGone: when the task ended (the reply started), the cards fade a moment later
+let cards = [], cardCount = 0, cardsGone = 0, req = null;   // req: what he asked; cardsGone: when the task ended, the header and cards fade a moment later
+const tidy = (v, max) => { v = String(v == null ? '' : v).replace(/\s+/g, ' ').trim(); return v.length > max ? v.slice(0, max - 1) + '\u2026' : v; };
+function taskDone() {
+  if (!(cards.length || req) || cardsGone) return;
+  for (const c of cards) if (!c.done) { c.done = true; c.doneAt = T; }
+  if (req) req.endAt = T; cardsGone = T;
+}
 const SPOKES = 40, flow = []; let sparks = [];   // thinking: pixel blocks fall from the ring into the core along 40 straight rails
 function flowSpawn(p, anywhere) { p.a = ((Math.random() * SPOKES | 0) + 0.5) / SPOKES * TAU; p.r = anywhere ? 0.2 + Math.random() * 0.75 : 0.9 + Math.random() * 0.1; p.s = 2 + (Math.random() * 3 | 0); p.v = 0.7 + Math.random() * 0.6; return p; }
 for (let i = 0; i < 110; i++) flow.push(flowSpawn({}, true));
@@ -425,9 +459,17 @@ function noteVoice(dt) {
   waveW += ((state === 'listen' && phase === 'on' ? 1 : 0) - waveW) * Math.min(1, dt * 4);
   speakW += ((state === 'speak' && phase === 'on' ? 1 : 0) - speakW) * Math.min(1, dt * 4);
   thinkW += (((state === 'think' || state === 'work') && phase === 'on' ? 1 : 0) - thinkW) * Math.min(1, dt * 3);
+  gyroClock += dt * (0.3 + thinkW * (state === 'work' ? 3.4 : 2.4));
   if (thinkW < 0.01) return;
   const v = dt * (state === 'work' ? 1.7 : 1);   // working a task step: faster
   for (const p of flow) { p.r -= v * p.v * (0.12 + (1 - p.r) * 0.55); if (p.r < 0.2) { sparks.push({ at: T, a: p.a }); flowSpawn(p, false); } }   // it speeds up as it falls; arriving sparks the core's edge
+}
+function drawGyro(R, cx, cy, p) {   // the blocks riding the orbits: pale in front of the core, dim amber behind it
+  const z = Math.max(3, Math.round(R * 0.013));
+  for (let i = 0; i < gyroPts.length; i += 3) {
+    const front = gyroPts[i + 2] > 0, s = front ? z + 1 : z - 1;
+    hx.fillStyle = front ? pale(0.95 * p) : amber(0.6 * p); hx.fillRect(Math.round(cx + gyroPts[i] * R - s / 2), Math.round(cy - gyroPts[i + 1] * R - s / 2), s, s);
+  }
 }
 function drawInflow(R, cx, cy) {   // thinking: he draws everything in
   if (thinkW < 0.01) return;
@@ -713,23 +755,36 @@ Object.assign(window.jarvis, {
   composeDrop(on) { cc.classList.toggle('drop', !!on); },
   composing() { return cc.classList.contains('on'); },
 });
-const scs = document.getElementById('scs');
+const scs = document.getElementById('scs'), scH = document.getElementById('scH');
 function drawCards(R, cx, cy, hudP) {
   drawBlocks();
-  if (cardsGone && T - cardsGone > 3.2) { cards = []; cardsGone = 0; }
+  if (cardsGone && T - cardsGone > 4.4) { cards = []; cardsGone = 0; req = null; }
   const shown = cards.slice(-4);   // the oldest of five leaves
   for (const el of [...scs.children]) if (!shown.includes(el._c)) el.remove();
+  const fs = Math.max(12, Math.round(R * 0.036)), w = R * 1.3, x0 = Math.min(cx + R * 1.36, W - 24 - w), top = cy - R * 0.14;   // under the frame's right rail; a narrow screen: the cards move in rather than get cut
+  const fade = (cardsGone ? 1 - clamp01((T - cardsGone - 3.6) / 0.8) : 1) * hudP;
+  if (!req) { scH.style.opacity = 0; scH.classList.remove('in'); }
+  else {   // the header: his words, and THINKING / WORKING / DONE with the steps and the seconds
+    Object.assign(scH.style, { left: x0 + 'px', top: top + 'px', width: w + 'px', fontSize: fs + 'px', opacity: fade });
+    if (req.fresh) {   // a new ask assembles like every card; a corrected word just changes
+      scH.querySelector('q').textContent = '\u201C' + req.text + '\u201D';
+      if (req.fresh === 'new') { scH.classList.remove('in'); void scH.offsetWidth; scH.classList.add('in'); burst(scH); }
+      req.fresh = '';
+    }
+    const secs = ((req.endAt || T) - req.at).toFixed(1) + ' s', n = cards.length;
+    scH.querySelector('span').textContent = req.endAt ? 'DONE' + (n ? ' \u00B7 ' + n + (n === 1 ? ' STEP' : ' STEPS') : '') + ' \u00B7 ' + secs : (n ? 'WORKING' : 'THINKING') + ' \u00B7 ' + secs;
+  }
   if (!shown.length) return;
-  const fs = Math.max(12, Math.round(R * 0.036)), w = R * 0.95, x0 = Math.min(cx + R * 1.36, W - 24 - w), top = cy - R * 0.08;   // a narrow screen: the cards move in rather than get cut
-  Object.assign(scs.style, { left: x0 + 'px', top: (top - fs * 1.15) + 'px', width: w + 'px', fontSize: fs + 'px', gap: Math.round(fs * 0.6) + 'px',
-    opacity: (cardsGone ? 1 - clamp01((T - cardsGone - 2.4) / 0.8) : 1) * hudP });
+  Object.assign(scs.style, { left: x0 + 'px', top: (top + (req ? scH.offsetHeight + fs * 0.7 : 0)) + 'px', width: w + 'px', fontSize: fs + 'px', gap: Math.round(fs * 0.55) + 'px', opacity: fade });
   for (const c of shown) {
     if (!c.el) {
-      const el = c.el = document.createElement('div'); el.className = 'sc'; el._c = c; el.style.height = Math.round(fs * 2.3) + 'px';
-      el.innerHTML = `<i>${String(c.n).padStart(2, '0')}</i><span><u></u></span><em><b></b></em>`; el.querySelector('u').textContent = c.text;   // the text types out; a pulsing block while it works, then a tick
+      const el = c.el = document.createElement('div'); el.className = 'sc'; el._c = c; el.style.height = Math.round(fs * 3.5) + 'px';
+      el.innerHTML = `<i>${String(c.n).padStart(2, '0')}</i><div class="scT"><div><span><u></u></span></div><div><b class="scK"></b>${c.detail ? '<small></small>' : ''}</div></div><em><b></b><s></s></em>`;   // the title types out; a pulsing block while it works, then a tick and its time
+      el.querySelector('u').textContent = c.text; el.querySelector('.scK').textContent = c.kind; if (c.detail) el.querySelector('small').textContent = c.detail;
       scs.appendChild(el); burst(el);
     }
     c.el.classList.toggle('done', c.done);
+    c.el.querySelector('s').textContent = ((c.done ? c.doneAt : T) - c.at).toFixed(1) + ' s';
   }
   const live = shown.find(c => !c.done);
   if (live) {   // the live step: a line reaches out from the globe's edge to its card
@@ -801,7 +856,7 @@ function drawHud(R, cx, cy, tl) {
     for (let i = 0; i < 24; i++) { const a = i / 24 * Math.PI * 2 - gaugeClock * 0.4; hx.strokeStyle = c((i % 6 ? 0.3 : 0.7) * p); hx.beginPath(); hx.moveTo(gx + Math.cos(a) * gr * 1.08, gy + Math.sin(a) * gr * 1.08); hx.lineTo(gx + Math.cos(a) * gr * 1.22, gy + Math.sin(a) * gr * 1.22); hx.stroke(); }
     hx.fillStyle = c(0.9 * p); hx.beginPath(); hx.arc(gx, gy, 2.5, 0, Math.PI * 2); hx.fill();
   }
-  drawInflow(R, cx, cy); drawVoice(R, cx, cy); drawWave(R, cx, cy); drawCards(R, cx, cy, p);
+  drawGyro(R, cx, cy, tl.arcs); drawInflow(R, cx, cy); drawVoice(R, cx, cy); drawWave(R, cx, cy); drawCards(R, cx, cy, p);
   if (flash > 0.01) {
     const gR = R * (0.25 + flash * 0.55), g = hx.createRadialGradient(cx, cy, 0, cx, cy, gR);
     g.addColorStop(0, `rgba(255,235,190,${flash * 0.7})`); g.addColorStop(0.4, `rgba(255,150,40,${flash * 0.2})`); g.addColorStop(1, 'rgba(255,110,20,0)');

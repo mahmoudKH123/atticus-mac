@@ -194,7 +194,7 @@ enum Prefs {
             ["name": "Technical", "text": "Precise terms, numbers and how it works. Name the tradeoff."],
             ["name": "Friendly", "text": "Warm and conversational, like talking to a colleague. Simple words."]],
         "selection": true, "ahead": true, "aheadDelay": 0.7, "live": true, "screen": "auto", "openOn": "here", "workIn": "back", "miniScreen": true, "draw": true, "guideSteps": "auto", "pageJS": false,
-        "speak": false, "jarvis": false, "jarvisVoice": "Daniel (Enhanced)", "jarvisEngine": "kokoro", "jarvisKokoroVoice": "bm_daniel", "jarvisRate": 180, "jarvisPitch": 0, "jarvisEffect": false, "jarvisClap": false, "jarvisEcho": true, "showAnswers": "stream", "autoCopy": false, "hideWhenSharing": true, "menuIcon": true, "autoUpdate": true,
+        "speak": false, "jarvis": false, "jarvisVoice": "Daniel (Enhanced)", "jarvisEngine": "kokoro", "jarvisKokoroVoice": "bm_daniel", "jarvisRate": 180, "jarvisPitch": 0, "jarvisEffect": false, "jarvisClap": false, "jarvisEcho": true, "jarvisCloseVoice": true, "showAnswers": "stream", "autoCopy": false, "hideWhenSharing": true, "menuIcon": true, "autoUpdate": true,
         "learn": true, "safe": true, "pointer": false, "meeting": false, "meetingSave": true, "meetingAuto": "sure", "meetingNudge": false, "meetingDetect": true, "learnMe": true, "saveChats": true, "stats": true, "tips": true, "support": true, "comeBack": true, "askMe": true, "meetingSummary": true, "input": "voice", "talkMode": "hold", "speechModel": "speech", "whisperModel": "turbo", "whisperLanguage": "auto", "improve": false, "improveAsked": false, "draftInsert": "ask",
         "dictateHotkeyCode": -1, "dictateHotkeyMods": 0, "dictateHotkeyLabel": "", "dictateMode": "cleanup", "dictateHistory": true, "dictateLearn": true, "dictateWords": [], "dictateFixes": [String: String](), "boxW": 500, "boxH": 420]
     static let retiredKeys = ["quietAudio", "quietLevel", "autoCopy", "askMe", "corner", "linger", "soundStart", "soundRelease", "soundDone", "soundStop",
@@ -332,11 +332,56 @@ final class Mic: NSObject, AVCaptureAudioDataOutputSampleBufferDelegate {
         onBuffer(buf)
     }
 }
+// JARVIS mode: only a close, clear voice counts. Each 16 kHz mic buffer passes through here, on the mic queue, before Whisper gets it:
+// rumble under about 110 Hz is filtered out, and whatever is not his voice (the room, a TV across it, keys) is turned down 18 dB, so
+// Whisper reads his words and little else. "His voice" is sound well over the room's level that lasts, and, once his usual speaking
+// level has been learnt, not far under it. Levels are on the app's scale (RMS x 14).
+final class VoiceGate: @unchecked Sendable {
+    private let lock = NSLock(), his: Double
+    private var room = 0.03, gain: Float = 0.12, lastIn: Float = 0, lastOut: Float = 0, overFor = 0.0, openFor = 0.0, heard = false
+    private var levels: [Float] = [], secs = 0.0, voiced = 0.0, under = 0.0
+    init(his: Double) { self.his = his }
+    // The bar a sound must clear: over the room, and at least 30 per cent of his usual level; a noisy room never asks for more than 60 per cent of it.
+    static func bar(his: Double, room: Double) -> Double { max(0.08, his * 0.3, his > 0 ? min(room * 2.5, his * 0.6) : room * 2.5) }
+    func hear(_ b: AVAudioPCMBuffer) {
+        guard let ch = b.floatChannelData?[0], b.frameLength > 0 else { return }
+        let n = Int(b.frameLength), dur = Double(n) / b.format.sampleRate
+        lock.lock(); defer { lock.unlock() }
+        var sum: Float = 0
+        for i in 0..<n { let x = ch[i]; lastOut = 0.958 * (lastOut + x - lastIn); lastIn = x; ch[i] = lastOut; sum += lastOut * lastOut }
+        let level = Double(sqrt(sum / Float(n))) * 14, bar = Self.bar(his: his, room: room)
+        secs += dur
+        let above = level > (openFor > 0 ? bar * 0.6 : bar)   // once he is talking it takes a real drop to count as a pause
+        overFor = above ? overFor + dur : 0
+        if above && (overFor >= 0.06 || openFor > 0) {   // a click or a key is over in a moment; a voice lasts
+            openFor = 0.4; heard = true; voiced += dur
+            if levels.count < 6000 { levels.append(Float(level)) }
+        } else {
+            openFor = max(0, openFor - dur)
+            if !above {
+                room += (min(level, 1) - room) * min(1, dur / 1.5)   // the room's level, learnt from what is not his voice
+                if level > bar * 0.5 { under += dur }                  // close to the bar but under it: he may be further back today (or it is a loud TV)
+            }
+        }
+        let target: Float = above || openFor > 0 ? 1 : 0.12, step = (target - gain) / Float(n)   // glide, so nothing clicks
+        for i in 0..<n { gain += step; ch[i] *= gain }
+        gain = target
+    }
+    func takeHeard() -> Bool { lock.lock(); defer { lock.unlock() }; let h = heard; heard = false; return h }   // his voice since the last look
+    var roomLevel: Double { lock.lock(); defer { lock.unlock() }; return room }
+    // How the listen went: its length, the seconds of his voice and their upper-middle level, the seconds of sound under his usual level.
+    func summary() -> (secs: Double, voiced: Double, level: Double, under: Double, room: Double, bar: Double) {
+        lock.lock(); defer { lock.unlock() }
+        let sorted = levels.sorted()
+        return (secs, voiced, sorted.isEmpty ? 0 : Double(sorted[min(sorted.count - 1, sorted.count * 3 / 4)]), under, room, Self.bar(his: his, room: room))
+    }
+}
 // JARVIS mode: two sharp claps wake the hands-free chat. Runs on the wake word's 16 kHz mic, on its queue, no AI.
 // A clap is a sudden, bright (high-frequency) burst that dies away within ~120 ms; speech, knocks and music fail one of those.
 final class ClapDetector: @unchecked Sendable {
     var minLevel: Float = 0.04, jump: Float = 5, bright: Float = 0.4   // tuned on real claps: claps 0.45-0.7 bright, knocks 0.1-0.25
     private var background: Float = 0.003, previous: Float = 0, last: Float = 0
+    private(set) var recent: Float = 0   // the loudest 10 ms lately (halves every 2 s): how close the voice that said his name was
     private var candidate: (at: Double, peak: Float, frames: Int)?, claps: [Double] = [], quietUntil = 0.0, clock = 0.0, cooldown = 0.0, ignoreUntil = 0.0
     var onDouble: (() -> Void)?
     func reset() { candidate = nil; claps = []; previous = 0; last = 0 }
@@ -352,7 +397,7 @@ final class ClapDetector: @unchecked Sendable {
         }
     }
     private func frame(_ level: Float, _ highs: Float) {
-        clock += 0.01
+        clock += 0.01; recent = max(level, recent * 0.9965)
         if var c = candidate {   // a clap must fall to under a third of its peak within 120 ms
             c.frames += 1; c.peak = max(c.peak, level)
             if level < c.peak / 3 { candidate = nil; clap(c.at, c.peak) }
@@ -2974,7 +3019,12 @@ final class App: NSObject, WKScriptMessageHandler {
                 guard let self, wakeID == id else { return }
                 if let result, Self.hasWakeWord(result.bestTranscription.formattedString, word: Self.wakeName) {
                     wakeBackoff = 1
-                    stopWake(); handsFree = true; clickMicrophone()
+                    if Prefs.bool("jarvis"), clapMic.isRunning {   // JARVIS: his name counts only when said close by (a TV across the room said it too)
+                        let level = Double(clap.recent) * 14, his = UserDefaults.standard.double(forKey: "jarvisVoiceLevel"), bar = max(0.12, his * 0.3)
+                        NSLog("Wake word: heard at level %.2f (needs %.2f)", level, bar)
+                        if level < bar { stopWake(); return }   // start the listener afresh, or the same words would wake him at the next loud sound
+                    }
+                    stopWake(); handsFree = true; if Prefs.bool("jarvis") { jarvisGreet() } else { clickMicrophone() }
                 } else if error != nil || result?.isFinal == true {
                     if let error { NSLog("Wake word: recognizer error %@", error.localizedDescription) }
                     if error == nil { wakeBackoff = 1 }; wakeFailed()
@@ -2998,13 +3048,50 @@ final class App: NSObject, WKScriptMessageHandler {
         let detector = clap
         detector.reset(); detector.onDouble = { DispatchQueue.main.async { [weak self] in
             guard let self, clapID == id, clapOn, wakeWhy.isEmpty else { return }
+            let keys = min(CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .keyDown), CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .leftMouseDown))
+            if keys < 0.9 { NSLog("Clap: ignored, a key or click %.1f s ago", keys); return }   // typing and trackpad clicks are sharp and bright too; a real clap takes both hands off them
             stopClap(); stopWake(); handsFree = true
-            if jarvisBriefingDue() { jarvisBrief() } else { clickMicrophone() }
+            if jarvisBriefingDue() { jarvisBrief() } else { jarvisGreet() }
         } }
         clapMic.start(device, sampleRate: 16000, { detector.feed($0) }) { [weak self] result in
             guard let self, clapID == id else { return }
             if case .failure(let error) = result { NSLog("Clap: mic error %@", error.localizedDescription); stopClap() }
         }
+    }
+    // JARVIS mode: he answers the moment he's called. The greeting plays here from its ready clip, in place of the start sound, and the mic
+    // opens as it ends, so he never hears himself. No clip yet (first run, a new speed, Apple's voice): the live voice says it instead.
+    var jarvisGreetPlayer: AVAudioPlayer?, jarvisGreetUntil = Date.distantPast, jarvisGreeted = false
+    func jarvisGreet() {
+        guard Prefs.bool("jarvis"), Prefs.bool("speak") else { return clickMicrophone() }
+        let d = UserDefaults.standard, now = Date()
+        let g = jarvisGreeting(hour: Calendar.current.component(.hour, from: now), sinceLast: now.timeIntervalSince1970 - d.double(forKey: "jarvisGreetAt"),
+                               lastPart: d.string(forKey: "jarvisGreetPart") ?? "", last: d.string(forKey: "jarvisGreetLast") ?? "")
+        d.set(now.timeIntervalSince1970, forKey: "jarvisGreetAt"); d.set(g.part, forKey: "jarvisGreetPart"); d.set(g.line, forKey: "jarvisGreetLast")
+        var secs = 0.0
+        if Prefs.str("jarvisEngine") == "kokoro", let path = jarvisKokoroCachePath(g.line, rate: max(120, min(260, Prefs.num("jarvisRate") + jarvisTalkSpeed()))),
+           let player = try? AVAudioPlayer(contentsOf: URL(fileURLWithPath: path)) {
+            player.isMeteringEnabled = true
+            if player.play() { jarvisGreetPlayer = player; secs = player.duration }
+        }
+        NSLog("JARVIS: greeting (%@, %@)", g.part, secs > 0 ? "clip" : "live voice")   // which kind, never the words
+        jarvisSaid.note(g.line)
+        if secs > 0 {
+            jarvisGreetUntil = now.addingTimeInterval(secs); cueEnds = max(cueEnds, jarvisGreetUntil.addingTimeInterval(0.1))   // "sound": the clap and word listeners wait it out
+            DispatchQueue.main.asyncAfter(deadline: .now() + max(0.1, secs - 0.05)) { [weak self] in self?.jarvisGreetDone() }
+        } else { jarvisSpeakLive(g.line, track: false); jarvisEndLive(); jarvisGreetWait(0) }
+    }
+    func jarvisGreetWait(_ tries: Int) {   // the live voice: listen when it has finished (8 s at most)
+        if voice?.isRunning == true, tries < 80 { DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in self?.jarvisGreetWait(tries + 1) }; return }
+        jarvisGreetDone()
+    }
+    func jarvisGreetDone() {
+        jarvisGreetPlayer = nil
+        guard handsFree, !busy, !engine.isRunning, !dictating else { return }   // he pressed the shortcut meanwhile, or closed the chat
+        jarvisGreeted = true; clickMicrophone(); jarvisGreeted = false   // the greeting was the start sound
+    }
+    func jarvisGreetLevel() -> Double {   // the face's voice band moves with the clip
+        guard let p = jarvisGreetPlayer else { return 0 }
+        p.updateMeters(); return min(1, Double(pow(10, p.averagePower(forChannel: 0) / 20)) * 4)
     }
     // JARVIS mode: the first double clap of the day opens with a short, friendly morning rundown, then he listens as usual.
     // The facts are gathered here (weather, calendar, battery: about a second) so the AI only writes, with no tool calls.
@@ -3228,7 +3315,7 @@ final class App: NSObject, WKScriptMessageHandler {
         if !Prefs.bool("speak") { js("quietListen", true) }   // show it with the done sound; the mic opens as the sound ends
         DispatchQueue.main.asyncAfter(deadline: .now() + max(0, cueEnds.timeIntervalSinceNow) + 0.05) { [weak self] in self?.wakeTick() }
     }
-    func cue(_ k: String) { let n = Prefs.str(k); if n != "None" { sound(n, Float(Prefs.num("volume"))) } }   // soundStart / soundRelease / soundDone / soundStop
+    func cue(_ k: String) { if k == "soundStart", jarvisGreeted { return }; let n = Prefs.str(k); if n != "None" { sound(n, Float(Prefs.num("volume"))) } }   // soundStart / soundRelease / soundDone / soundStop
     let drawing = ScreenDrawing()
     var drawingReply = false
     var pointContext: [String:Any]?
@@ -3307,6 +3394,13 @@ final class App: NSObject, WKScriptMessageHandler {
         guard !typeFile.isEmpty else { return }
         try? (text ?? "").write(toFile: typeFile, atomically: true, encoding: .utf8); typeFile = ""
     }
+    // JARVIS step cards: the header says what he asked and how the task is going; each step's card carries its kind and detail.
+    var jarvisCard: String?, jarvisSteps = 0, jarvisFaceBusy = false
+    func jarvisAsk(_ t: String) {
+        let ask = t.hasPrefix(Self.jarvisBriefing) ? "Daily briefing" : t.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard Prefs.bool("jarvis"), !dictating, !ask.isEmpty, let d = try? JSONSerialization.data(withJSONObject: ask, options: .fragmentsAllowed) else { return }
+        face.run("jarvis.ask(\(String(decoding: d, as: UTF8.self)))")
+    }
     var jarvisStepAt = Date.distantPast, kokoroCheckedAt = Date(), micLevel = 0.0, jarvisVoiceLevel = 0.0, jarvisVoiceAt = Date.distantPast, jarvisActiveAt = Date.distantPast, faceState = "", jarvisApproval = false
     func jarvisTick() {   // 30 times a second: wake or sleep the face, and give it the state and the voice's loudness
         let on = Prefs.bool("jarvis")
@@ -3317,7 +3411,8 @@ final class App: NSObject, WKScriptMessageHandler {
             if jarvisKokoroReady(), let fd = jarvisKokoroConnect() { Darwin.close(fd) } else if jarvisKokoroReady() { jarvisWarm() }
         }
         guard on || face.shown else { return }
-        let speaking = voice?.isRunning == true && (!busy || Date().timeIntervalSince(jarvisVoiceAt) < 0.8)   // the "On it." voice waiting for the reply: thinking
+        let greeting = Date() < jarvisGreetUntil
+        let speaking = greeting || voice?.isRunning == true && (!busy || Date().timeIntervalSince(jarvisVoiceAt) < 0.8)   // the "On it." voice waiting for the reply: thinking
         if on && !dictating && (handsFree || busy || engine.isRunning || speaking) {
             jarvisActiveAt = Date()
             if !face.shown { face.wake(); faceState = "" }
@@ -3325,7 +3420,11 @@ final class App: NSObject, WKScriptMessageHandler {
         guard face.shown else { return }
         let state = speaking ? "speak" : engine.isRunning ? "listen" : busy ? (Date().timeIntervalSince(jarvisStepAt) < 3 ? "work" : "think") : "idle"
         if state != faceState { faceState = state; face.run("jarvis.state('\(state)')") }
-        let level = speaking ? (Date().timeIntervalSince(jarvisVoiceAt) < 0.3 ? jarvisVoiceLevel : 0) : engine.isRunning ? micLevel : 0
+        if busy != jarvisFaceBusy {   // the task ended (not just a line spoken mid-task): the cards tick and the header says DONE
+            jarvisFaceBusy = busy
+            if busy { jarvisSteps = 0 } else { face.run("jarvis.done()"); NSLog("JARVIS: task done, %d step cards", jarvisSteps) }
+        }
+        let level = greeting ? jarvisGreetLevel() : speaking ? (Date().timeIntervalSince(jarvisVoiceAt) < 0.3 ? jarvisVoiceLevel : 0) : engine.isRunning ? micLevel : 0
         face.run(String(format: "jarvis.level(%.3f)", level))
     }
     func jarvisLevels(_ p: Process) {   // the voice helper reports its loudness; the face glows with it
@@ -4105,6 +4204,7 @@ final class App: NSObject, WKScriptMessageHandler {
         if !keepReply { drawingReply = false }
         mini.reset()
         engine.stop(); speechInputs?.finishAll(); reading?.cancel(); nextReading?.cancel(); pause?.cancel()
+        jarvisMicLearn()   // a listen that ends in silence still gets its line in the log
         if !keepWarm { unwarm() }
         quietAudio.end()
         if quietFollowUp { js("quietListen", false) }
@@ -4496,6 +4596,8 @@ final class App: NSObject, WKScriptMessageHandler {
         }
         let want = whisper ? AVAudioFormat(standardFormatWithSampleRate: 16000, channels: 1)! : speechFormat ?? AVAudioFormat(standardFormatWithSampleRate: 16000, channels: 1)!
         let pcm = whisperAudio   // Whisper takes raw samples: AnalyzerInput traps on a plain 16 kHz Float32 buffer
+        voiceGate = whisper && !dictate && Prefs.bool("jarvis") && Prefs.d["jarvisCloseVoice"] as? Bool ?? true ? VoiceGate(his: UserDefaults.standard.double(forKey: "jarvisVoiceLevel") * jarvisVoiceEase) : nil
+        let gate = voiceGate   // JARVIS: only his close voice reaches Whisper at full level
         var conv: AVAudioConverter?, convFrom: AVAudioFormat?
         var n = 0
         let onBuffer: (AVAudioPCMBuffer) -> Void = { [weak self] buf in
@@ -4506,8 +4608,10 @@ final class App: NSObject, WKScriptMessageHandler {
                     if given { status.pointee = .noDataNow; return nil }
                     given = true; status.pointee = .haveData; return buf
                 }
+                gate?.hear(out)
                 if whisper { pcm.append(out) } else { self?.speechInputs?.yield(AnalyzerInput(buffer: out)) }
             } else {
+                gate?.hear(buf)
                 if whisper { pcm.append(buf) } else { self?.speechInputs?.yield(AnalyzerInput(buffer: buf)) }
             }
             n += 1
@@ -4515,7 +4619,7 @@ final class App: NSObject, WKScriptMessageHandler {
             var sum: Float = 0
             for i in 0..<Int(buf.frameLength) { sum += ch[i] * ch[i] }
             let v = Double(min(1, sqrt(sum / Float(buf.frameLength)) * 14))
-            DispatchQueue.main.async { if self?.listenID == listeningID, self?.engine.isRunning == true { self?.micLevel = v; self?.noteVoice(v); if self?.quietFollowUp == false { self?.js("level", v) }; if whisper && v > 0.1 { self?.whisperVoiced() } } }
+            DispatchQueue.main.async { if self?.listenID == listeningID, self?.engine.isRunning == true { self?.micLevel = v; self?.noteVoice(v); if self?.quietFollowUp == false { self?.js("level", v) }; if whisper && (self?.closeVoice ?? (v > 0.1)) { self?.whisperVoiced() } } }
         }
         if !dictate, let pre = jarvisPreroll, Date().timeIntervalSince(pre.at) < 3 { pre.buffers.forEach(onBuffer) }   // JARVIS talk-over: the words that stopped him begin this ask
         jarvisPreroll = nil
@@ -4538,8 +4642,29 @@ final class App: NSObject, WKScriptMessageHandler {
 
     // JARVIS mode: the words can lag the voice, so a 1.3 s gap in the words is not the end while the mic still hears him talking.
     var micFloor = 0.05, voiceHeardAt = Date.distantPast
+    var voiceGate: VoiceGate?, closeVoice: Bool?   // closeVoice: the gate's word on the last stretch of sound (nil: no gate, the level rule below decides)
     func noteVoice(_ v: Double) {
+        if let g = voiceGate {   // JARVIS: his close voice, not just any sound over the room, keeps the listen going and lets words count
+            let heard = g.takeHeard(); closeVoice = heard; micFloor = g.roomLevel
+            if heard { voiceHeardAt = Date() }
+            return
+        }
+        closeVoice = nil
         if v > max(0.08, micFloor * 2.5) { voiceHeardAt = Date() } else { micFloor = micFloor * 0.97 + v * 0.03 }   // the room's level, learnt from the quiet
+    }
+    // JARVIS mode: his usual speaking level, learnt from the asks that had words (a slow average, kept between launches), so a voice well under
+    // it, a TV across the room or someone further away, does not count. If a whole listen had sound just under the bar and none over it, the
+    // bar eases for now (to 60 per cent at most): he may be sitting further back. The next ask he is heard on puts it back.
+    // One line per listen in the log, numbers only.
+    var jarvisVoiceEase = 1.0
+    func jarvisMicLearn() {
+        guard let g = voiceGate else { return }
+        voiceGate = nil; closeVoice = nil
+        let m = g.summary(), d = UserDefaults.standard
+        var his = d.double(forKey: "jarvisVoiceLevel")
+        if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, m.voiced >= 0.6 { his = his == 0 ? m.level : his * 0.8 + m.level * 0.2; jarvisVoiceEase = 1; d.set(his, forKey: "jarvisVoiceLevel") }
+        else if m.voiced < 0.2, m.under > 1.5 { jarvisVoiceEase = max(0.6, jarvisVoiceEase * 0.8) }
+        NSLog("JARVIS mic: %.1f s, his voice %.1f s at %.2f, quieter sound %.1f s, room %.3f, bar %.2f, his level now %.2f (eased x%.2f)", m.secs, m.voiced, m.level, m.under, m.room, m.bar, his, jarvisVoiceEase)
     }
     // JARVIS mode: how long a pause ends what he's saying. A sentence that stops on "just", "the", "and", "could you"
     // is a pause to think, not the end ("Could you please just" was sent on its own): wait 3 s for those, 1.5 s otherwise.
@@ -4691,7 +4816,9 @@ final class App: NSObject, WKScriptMessageHandler {
         busy = true
         if dictating { cue("soundRelease"); js("finishing", dictateCleanup ? "Cleaning up…" : "") }
         else if offerText == nil { js("think"); jarvisGotIt() }   // card replies keep the response clock paused
+        jarvisMicLearn()
         if Prefs.bool("jarvis") && !dictating { face.run("jarvis.heard()") }   // the face shows it heard him
+        if offerText == nil { jarvisAsk(text) }   // and his words go up beside the globe at once (a reply to a card keeps the task's own header)
         let an = analyzer, rd = reading, next = nextAnalyzer
         nextReading?.cancel(); nextFeed = nil; nextAnalyzer = nil; nextReading = nil; nextSpeechInputID = nil; nextSpeechSegment = 0
         Task { await next?.cancelAndFinishNow() }
@@ -5206,10 +5333,17 @@ final class App: NSObject, WKScriptMessageHandler {
                         self.mini.finish(); self.answer = "✓ " + (guided ? finish : result); self.js("line", self.answer)
                         self.deliver(guided ? finish : result, aloud: !guided); continue   // after the line: finding the read-aloud voice must not delay the answer; a guide's steps speak for themselves
                     }
+                    if line.hasPrefix("◈ ") {   // JARVIS: his ask as understood (the face's header), or the kind and detail of the step whose line comes next
+                        if Prefs.bool("jarvis"), let j = try? JSONSerialization.jsonObject(with: Data(line.dropFirst(2).utf8)) as? [String: Any] {
+                            if let ask = j["ask"] as? String { self.jarvisAsk(ask) }
+                            else { self.jarvisCard = (try? JSONSerialization.data(withJSONObject: j)).map { String(decoding: $0, as: UTF8.self) } }   // parsed and written again: only well-formed JSON reaches the page
+                        }
+                        continue
+                    }
                     if line.hasPrefix("▸ "), Prefs.bool("jarvis") {   // the face pulses on each task step and shows it as a card
                         self.jarvisStepAt = Date()
-                        let text = (try? JSONSerialization.data(withJSONObject: String(line.dropFirst(2)), options: .fragmentsAllowed)).map { String(decoding: $0, as: UTF8.self) } ?? "''"
-                        self.face.run("jarvis.step(\(text))")
+                        let text = self.jarvisCard ?? (try? JSONSerialization.data(withJSONObject: String(line.dropFirst(2)), options: .fragmentsAllowed)).map { String(decoding: $0, as: UTF8.self) } ?? "''"
+                        self.jarvisCard = nil; self.jarvisSteps += 1; self.face.run("jarvis.step(\(text))")
                     }
                     if line.hasPrefix("♪ ") { self.jarvisSpeakLive(String(line.dropFirst(2))); continue }
                     if line == "⏻" { if Prefs.bool("jarvis") { self.handsFree = false; self.followUp = false }; continue }   // JARVIS heard a sign-off: no listening after this reply
@@ -6504,6 +6638,20 @@ func jarvisOpen(_ file: String) -> AVAudioFile? {
 }
 // Common short replies, rendered ahead so they play at once. No "hmm": Kokoro can't say it.
 let jarvisShortReplies = ["Done.", "Sorted.", "On it.", "All done.", "No worries.", "Yep.", "Shall I go ahead?"]
+// JARVIS mode: what he says the moment he's called (a double clap, or his name): the time of day, or a short "Yes, sir?". Each is rendered
+// ahead like the quick replies (so 30 characters at most) and played by the app itself, with no voice process to start.
+let jarvisGreetings: [String: [String]] = [
+    "morning": ["Morning, sir.", "Good morning, sir.", "Morning, sir. What's first?"],
+    "afternoon": ["Afternoon, sir.", "Good afternoon, sir.", "Afternoon, sir. Go ahead."],
+    "evening": ["Evening, sir.", "Good evening, sir.", "Evening, sir. What'll it be?"],
+    "night": ["Still up, sir?", "Late one, sir?", "Burning the midnight oil, sir?"],
+    "again": ["Yes, sir?", "Sir?", "I'm here, sir.", "At your service, sir.", "Go ahead, sir.", "Listening, sir.", "Right here, sir.", "What do you need, sir?"]]
+// The time of day on the first call of that part of the day or after an hour away, a short one otherwise; never the line he heard last.
+func jarvisGreeting(hour: Int, sinceLast: TimeInterval, lastPart: String, last: String, pick: ([String]) -> String? = { $0.randomElement() }) -> (line: String, part: String) {
+    let part = hour < 5 || hour >= 23 ? "night" : hour < 12 ? "morning" : hour < 17 ? "afternoon" : "evening"
+    let lines = (part != lastPart || sinceLast > 3600 ? jarvisGreetings[part] : jarvisGreetings["again"]) ?? []
+    return (pick(lines.filter { $0 != last }) ?? "Yes, sir?", part)
+}
 // The voice helper's cue for the "got it" tone (not words to speak).
 let jarvisToneLine = "\u{266B}tone"
 // The app's cue that its own mic has stopped, so the voice helper may open the echo-cancelled mic (not words to speak).
@@ -6544,7 +6692,7 @@ func jarvisKokoroKeep(_ file: String, as cache: String?) {
     try? FileManager.default.copyItem(atPath: file, toPath: cache)
 }
 func jarvisKokoroPrerender(rate: Double) {   // --jarvis-warm: render the quick replies once the service is up
-    for words in jarvisShortReplies {
+    for words in jarvisShortReplies + jarvisGreetings.values.flatMap({ $0 }).sorted() {
         guard let cache = jarvisKokoroCachePath(words, rate: rate), !FileManager.default.fileExists(atPath: cache) else { continue }
         var fd = jarvisKokoroConnect(); let deadline = Date().addingTimeInterval(40)
         while fd == nil && Date() < deadline { usleep(250_000); fd = jarvisKokoroConnect() }

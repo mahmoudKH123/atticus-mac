@@ -2189,6 +2189,7 @@ def fast(text):
     query = m[2] if site else m[1] if m else ''
     if query and not DEICTIC.search(query) and not MORE.search(query) and not re.search(r'\b(for|the|a|an|and|to|of|some)$', query):
         if site and site[1] in SHOPS and pref('jarvis', False):   # JARVIS mode: a shop he names opens on its own Egyptian site, and the step shows as a card
+            say('◈', json.dumps({'kind': 'SHOP', 'title': f'Searching {SHOPS[site[1]][0]}', 'detail': f'“{query}” · in Chrome'}, ensure_ascii=False))
             say('▸', f'Searching {SHOPS[site[1]][0]} for {query}')
             if not shop_tool([query, site[1]]).startswith('Opened '): return None
             fast.cmds = [f'{shlex.quote(ME)} --shop {shlex.quote(query)} {site[1]}']
@@ -2471,6 +2472,107 @@ def label(name, inp):
     for flag, text in (('calendar', 'Using your calendar'), ('reminders', 'Using Reminders'), ('mac', 'Using your Mac'), ('timer', 'Setting a timer'), ('mail', 'Checking your email'), ('contacts', 'Looking up contacts')):
         if c.startswith(f'{shlex.quote(ME)} --{flag} '): return text
     return ' '.join(str(inp.get('description') or '').split())[:80].rstrip('.') or 'Working on it'   # the AI's own plain words for the tool; never the raw command
+
+
+def card_when(iso):
+    """'2026-11-12T10:00:00+02:00' -> 'Tomorrow 10:00' for a JARVIS step card; anything unreadable -> ''."""
+    try: t = datetime.fromisoformat(str(iso).replace('Z', '+00:00'))
+    except ValueError: return ''
+    days = (t.date() - (datetime.now(t.tzinfo) if t.tzinfo else datetime.now()).date()).days
+    return ({0: 'Today', 1: 'Tomorrow', -1: 'Yesterday'}.get(days) or t.strftime('%a %-d %b')) + (t.strftime(' %H:%M') if len(str(iso)) > 10 else '')
+
+
+CARD_SECRET = re.compile(r'pass(word|code|phrase)?\b|\bpin\b|\botp\b|token|secret|api.?key|card number|\bcvv\b|\b\d{12,}\b', re.I)
+CARD_COMMANDS = {'ls': ('FILES', 'Looking through a folder'), 'cat': ('FILES', 'Reading a file'), 'head': ('FILES', 'Reading a file'), 'tail': ('FILES', 'Reading a file'), 'find': ('FILES', 'Searching a folder'),
+                 'mdfind': ('FILES', 'Searching your files'), 'mdls': ('FILES', 'Checking a file'), 'grep': ('FILES', 'Searching text'), 'curl': ('WEB', 'Fetching from the web'), 'osascript': ('APP', 'Talking to an app'),
+                 'date': ('MAC', 'Checking the time'), 'pmset': ('MAC', 'Checking the battery'), 'defaults': ('MAC', 'Reading a setting'), 'pbpaste': ('MAC', 'Reading the clipboard'), 'pbcopy': ('MAC', 'Copying to the clipboard'),
+                 'shortcuts': ('MAC', 'Running a shortcut'), 'python3': ('STEP', 'Working it out'), 'sleep': ('STEP', 'Waiting a moment')}
+def jarvis_card(name, inp, title):
+    """JARVIS mode: what a step card shows: the kind of work, a clear title and one line of real detail (the site, the words searched, the reminder
+    and its time, the person). Built only from named fields of the tool call: never the raw command, a message body or anything that looks secret."""
+    def card(kind, t=None, detail=''):
+        detail = ' '.join(str(detail or '').split())
+        return {'kind': kind, 'title': ' '.join(str(t or title).split())[:64], 'detail': '' if CARD_SECRET.search(detail) else detail[:72]}
+    def join(*parts): return ' · '.join(str(x) for x in parts if x)
+    home = os.path.expanduser('~')
+    if name == 'WebSearch': return card('WEB', 'Searching the web', inp.get('query', ''))
+    if name == 'WebFetch': return card('WEB', title, re.sub(r'^https?://(www\.)?', '', str(inp.get('url', ''))).split('?')[0])
+    if name == 'Read':
+        return card('SCREEN') if title == 'Looking at a screenshot' else card('FILES', title, os.path.dirname(str(inp.get('file_path', ''))).replace(home, '~'))
+    c = re.sub(r'^cd \S+\s*(;|&&)\s*', '', ' '.join(str(inp.get('command', '')).split()))
+    try: words = shlex.split(c)
+    except ValueError: words = []
+    flag = words[1] if len(words) > 1 and words[0] == ME and words[1].startswith('--') else ''
+    arg = words[2] if flag and len(words) > 2 else ''
+    try: j = json.loads(arg) if arg.startswith('{') else {}
+    except ValueError: j = {}
+    if not isinstance(j, dict): j = {}
+    act, named = str(j.get('action', '')), lambda k, what: f'{what} “{j[k]}”' if j.get(k) else ''
+    if flag == '--reminders':
+        t = {'list': 'Checking your reminders', 'add': named('title', 'Adding') or 'Adding a reminder', 'edit': 'Changing a reminder', 'complete': 'Ticking off reminders', 'delete': 'Deleting reminders'}.get(act, 'Using Reminders')
+        n = len(j.get('ids') or [])
+        return card('REMINDERS', t, join(card_when(j.get('due')) if j.get('due') else '', named('list', 'list').replace('“', '').replace('”', ''), named('query', 'matching'), f'{n} chosen' if n else ''))
+    if flag == '--calendar':
+        t = {'list': 'Checking your calendar', 'add': named('title', 'Adding') or 'Adding an event', 'move': 'Moving an event', 'delete': 'Deleting an event'}.get(act, 'Using your calendar')
+        start, end = card_when(j.get('start') or j.get('from') or ''), ''
+        if act == 'list':   # a look at whole days reads as the days: "Tomorrow", "Today to Sat 14 Nov"
+            try: last = datetime.fromtimestamp(datetime.fromisoformat(str(j.get('to')).replace('Z', '+00:00')).timestamp() - 60, datetime.fromisoformat(str(j.get('to')).replace('Z', '+00:00')).tzinfo).isoformat()[:10]
+            except (ValueError, OSError): last = ''
+            start, end = card_when(str(j.get('from') or '')[:10]), card_when(last)
+        return card('CALENDAR', t, join(start + (' to ' + end if end and end != start else ''), named('query', 'matching')))
+    if flag == '--mac':
+        v = str(j.get('value', ''))
+        t = {'status': 'Checking your Mac', 'volume': 'Setting the volume', 'brightness': 'Setting the brightness', 'mute': 'Muting the sound', 'unmute': 'Turning the sound back on', 'dark': 'Dark mode ' + v,
+             'wifi': 'Wi-Fi ' + v, 'bluetooth': 'Bluetooth ' + v, 'airplane': 'Airplane mode ' + v, 'screenshot': 'Taking a screenshot', 'lock': 'Locking your Mac', 'displaysleep': 'Turning the screen off',
+             'focus': 'Do Not Disturb ' + v}.get(act, 'Using your Mac')
+        level = v + ' per cent' if v.isdigit() else v
+        return card('MAC', t, {'volume': level, 'brightness': level, 'focus': f'for {j["minutes"]} minutes' if j.get('minutes') else '', 'status': 'volume, brightness, Wi-Fi, Bluetooth'}.get(act, ''))
+    if flag == '--timer':
+        if act == 'add':
+            try: secs = int(float(j.get('seconds', 0)))
+            except (TypeError, ValueError): secs = 0
+            h, m, sec = secs // 3600, secs % 3600 // 60, secs % 60
+            return card('TIMER', 'Starting a timer', join(' '.join(x for x in (f'{h} h' if h else '', f'{m} min' if m else '', f'{sec} s' if sec and not h else '') if x), j.get('name', '')))
+        if act == 'alarm': return card('TIMER', 'Setting an alarm', join(card_when(j.get('at') or ''), j.get('name', '')))
+        return card('TIMER', {'list': 'Checking timers and alarms', 'cancel': 'Cancelling a timer'}.get(act, 'Setting a timer'), j.get('name', ''))
+    if flag == '--mail': return card('MAIL', 'Checking your email', arg)
+    if flag == '--orders': return card('ORDERS', 'Checking your orders', 'order emails in your Gmail')
+    if flag == '--shop':
+        shops = [SHOPS[w.lower()][0] if w.lower() in SHOPS else w for w in words[3:] if not w.startswith('--')] or ['Amazon', 'Noon', 'Jumia']
+        return card('SHOP', 'Opening the shops in Chrome', join(f'“{arg}”', ', '.join(shops), 'cheapest first' if '--cheapest' in words else ''))
+    if flag == '--compose':
+        if arg == '--wait': return card('MESSAGE', 'Waiting on your card', 'Send is yours to press')
+        kind, to = str(j.get('kind') or 'email'), j.get('to') or []
+        to = [to] if isinstance(to, str) else [str(x) for x in to if isinstance(x, str)]
+        t = {'email': 'Opening an email card', 'sms': 'Opening a text card', 'whatsapp': 'Opening a WhatsApp card', 'call': 'Opening a video call card' if j.get('video') else 'Opening a call card'}.get(kind, 'Opening a card')
+        return card('CALL' if kind == 'call' else 'MAIL' if kind == 'email' else 'MESSAGE', t, join('to ' + ', '.join(to[:3]) if to else '', j.get('subject', '') if isinstance(j.get('subject'), str) else ''))
+    if flag == '--whatsapp': return card('MESSAGE', 'Opening a WhatsApp chat', 'with ' + arg if arg else '')
+    if flag == '--typein': return card('ASK', 'Waiting for you to type', arg)
+    if flag == '--pick': return card('ASK', 'Asking you which one', arg)
+    if flag == '--heard':
+        return card('MEMORY', 'Learning a word I misheard', f'“{arg}” → “{words[3]}”' if len(words) > 3 and not arg.startswith('--') else '')
+    if flag == '--talk': return card('MEMORY', 'Adjusting how I talk', arg if arg in TALK_STEPS else '')
+    if flag == '--me': return card('MEMORY', {'add': 'Noting that about you', 'drop': 'Forgetting that'}.get(arg, 'Checking what I know about you'), words[4] if arg == 'add' and len(words) > 4 else '')
+    if flag == '--contacts': return card('CONTACTS', 'Looking up contacts', ' '.join(w for w in words[2:4] if not w.startswith('-')))
+    if title.startswith('Searching the web: '): return card('WEB', 'Searching the web', title.split(': ', 1)[1])
+    if title in ('Reading the window', 'Looking at a screenshot', 'Taking a screenshot', 'Drawing on your screen', 'Getting ready to draw'):
+        return card('SCREEN', detail=os.environ.get('ATTICUS_FRONT', '') if title == 'Reading the window' else '')
+    if title in ('Noting that about you', 'Remembering that', 'Forgetting that', 'Saving your shortcut', 'Checking what you asked before'): return card('MEMORY')
+    if title == 'Asking you which one': return card('ASK')
+    if title == 'Changing a setting': return card('SETTINGS')
+    if title.startswith('Playing ') or title.endswith(' to the queue'): return card('MUSIC')
+    if title in ('Reading the page', 'Clicking', 'Filling it in', 'Typing at the answer', 'Using the page'): return card('WEB', detail=os.environ.get('ATTICUS_FRONT', ''))
+    url = re.search(r'https?://(?:www\.)?([^\s"\'?]+)', c)
+    if title.startswith(('Reading ', 'Opening ')) and url: return card('WEB', detail=url[1].rstrip('/'))
+    if title.startswith(('Clicking', 'Typing', 'Pressing', 'Bringing ', 'Moving ', 'Using ', 'Checking ')) or re.match(r'open (-g )?-a ', c): return card('APP')
+    if title.startswith('Opening '): return card('FILES', detail=os.path.dirname(words[-1]).replace(home, '~') if words and '/' in words[-1] else '')
+    tool = os.path.basename(words[0]) if words else ''
+    if tool in CARD_COMMANDS:   # a plain shell command: say what kind of thing it is, and the folder or site it touches
+        kind, plain = CARD_COMMANDS[tool]
+        where = url[1].split('/')[0] if url else next((w.replace(home, '~') for w in words[1:] if w.startswith(('/', '~')) and ME not in w), '')
+        if tool == 'mdfind' and not where: where = next((w for w in reversed(words[1:]) if not w.startswith('-')), '')
+        return card(kind, plain if title == 'Working on it' else title, where)
+    return card('STEP')
 
 
 WEB_JS = os.path.join(os.path.dirname(ME), 'ui', 'web.js')
@@ -5829,6 +5931,7 @@ def run(task, p=None, shots=(), auto_work=False, *, request=None, main_only=Fals
                             p.waiting.clear()
                             reset_deadline()
                             steps.append(label(name, inp))
+                            if pref('jarvis', False): say('◈', json.dumps(jarvis_card(name, inp, steps[-1]), ensure_ascii=False))   # the step card's kind and detail, just ahead of its line
                             say('▸', steps[-1])
                             if TURN:
                                 TURN['step_times'].append({'label': steps[-1], 'secs': 0, 'status': 'running', '_start': time.monotonic()})
@@ -8893,6 +8996,8 @@ def main():
     if not task:
         return warm and stop_claude(warm)
     if pref('jarvis', False): task = jarvis_heard(task)
+    if pref('jarvis', False) and os.environ.get('ATTICUS_UI') == '1' and not task.startswith('Daily briefing, first wake'):
+        say('◈', json.dumps({'ask': task[:200]}, ensure_ascii=False))   # the face's header: his ask as understood (a misheard word already put right)
     marked, marked_images = point_context(marks)
     for path, _ in marked_images:
         atexit.register(lambda p=path: os.path.exists(p) and os.remove(p))
